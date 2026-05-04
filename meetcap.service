@@ -4,6 +4,7 @@ After=pipewire.service
 
 [Service]
 Type=simple
+Environment=LD_LIBRARY_PATH=/home/lucca/Projects/meetcap/.venv/lib/python3.11/site-packages/nvidia/cublas/lib:/home/lucca/Projects/meetcap/.venv/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib
 ExecStart=/home/lucca/Projects/meetcap/.venv/bin/python /home/lucca/Projects/meetcap/src/meetcap.py daemon
 Restart=on-failure
 RestartSec=3
