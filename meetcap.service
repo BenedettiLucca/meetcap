@@ -1,15 +1,12 @@
 [Unit]
-Description=Meetcap Meeting Recorder
+Description=Meetcap Meeting Recorder Daemon
 After=pipewire.service
 
 [Service]
 Type=simple
-ExecStart=/home/lucca/Projects/meetcap/.venv/bin/python /home/lucca/Projects/meetcap/src/meetcap.py
+ExecStart=/home/lucca/Projects/meetcap/.venv/bin/python /home/lucca/Projects/meetcap/src/meetcap.py daemon
 Restart=on-failure
-RestartSec=5
-Environment=DISPLAY=:0
-Environment=WAYLAND_DISPLAY=wayland-1
-Environment=XDG_RUNTIME_DIR=/run/user/1000
+RestartSec=3
 
 [Install]
 WantedBy=default.target
