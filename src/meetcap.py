@@ -13,6 +13,7 @@ import signal
 import socket
 import subprocess
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -32,6 +33,7 @@ WHISPER_COMPUTE = os.environ.get("MEETCAP_COMPUTE", "float16")
 class State:
     recording_proc = None
     recording_file = None
+    recording_log = None
     is_recording = False
     is_transcribing = False
     last_error = None
@@ -77,24 +79,45 @@ def start_recording():
 
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         wav_file = RECORDINGS_DIR / f"meeting-{ts}.wav"
+        log_file = wav_file.with_suffix(".ffmpeg.log")
         state.recording_file = wav_file
+        state.recording_log = log_file
 
         cmd = [
             "ffmpeg", "-y",
             "-f", "pulse", "-i", mic_src,
             "-f", "pulse", "-i", sys_src,
             "-filter_complex",
-            "[0:a]aformat=sample_rates=16000|channel_layouts=mono[mic];"
-            "[1:a]aformat=sample_rates=16000|channel_layouts=mono[sys];"
+            "[0:a]aformat=sample_rates=16000:channel_layouts=mono[mic];"
+            "[1:a]aformat=sample_rates=16000:channel_layouts=mono[sys];"
             "[mic][sys]join=inputs=2:channel_layout=stereo[out]",
             "-map", "[out]",
             "-acodec", "pcm_s16le",
             str(wav_file),
         ]
 
-        state.recording_proc = subprocess.Popen(
-            cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
-        )
+        with log_file.open("wb") as stderr_log:
+            state.recording_proc = subprocess.Popen(
+                cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=stderr_log
+            )
+
+        # ffmpeg can fail immediately on filter/source errors. Do not lie to the UI.
+        time.sleep(0.5)
+        if state.recording_proc.poll() is not None:
+            error_tail = ""
+            try:
+                error_tail = "\n".join(log_file.read_text(errors="replace").splitlines()[-8:])
+            except Exception:
+                pass
+            state.last_error = f"ffmpeg exited immediately ({state.recording_proc.returncode})"
+            if error_tail:
+                state.last_error += f": {error_tail}"
+            state.recording_proc = None
+            state.is_recording = False
+            save_state()
+            notify("Meetcap", "❌ Recording failed", state.last_error[:180])
+            return {"ok": False, "error": state.last_error, "log": str(log_file)}
+
         state.is_recording = True
         state.last_error = None
         save_state()
@@ -119,6 +142,11 @@ def stop_recording():
         wav = state.recording_file
         state.is_recording = False
         state.recording_proc = None
+        if not wav or not wav.exists() or wav.stat().st_size <= 44:
+            state.last_error = f"Recording stopped but WAV was not created or is empty: {wav}"
+            save_state()
+            notify("Meetcap", "❌ Recording failed", state.last_error[:180])
+            return {"ok": False, "error": state.last_error}
         state.last_error = None
         save_state()
 
