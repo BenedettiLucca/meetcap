@@ -6,6 +6,7 @@ Records dual-channel WAV (mic=left, system audio=right) via ffmpeg/PipeWire.
 Transcribes with faster-whisper (CUDA GPU).
 """
 
+import gc
 import os
 import sys
 import json
@@ -25,7 +26,7 @@ SOCKET_PATH = Path("/tmp/meetcap.sock")
 PID_FILE = Path("/tmp/meetcap.pid")
 STATE_FILE = Path("/tmp/meetcap_state.json")
 
-WHISPER_MODEL = os.environ.get("MEETCAP_MODEL", "large-v3")
+WHISPER_MODEL = os.environ.get("MEETCAP_MODEL", "large-v3-turbo")
 WHISPER_DEVICE = os.environ.get("MEETCAP_DEVICE", "cuda")
 WHISPER_COMPUTE = os.environ.get("MEETCAP_COMPUTE", "float16")
 
@@ -164,38 +165,72 @@ def format_timestamp(seconds):
 def transcribe(wav_path):
     from faster_whisper import WhisperModel
 
-    print(f"[WHISPER] Loading {WHISPER_MODEL} on {WHISPER_DEVICE}...")
-    model = WhisperModel(WHISPER_MODEL, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE)
+    def attempt_transcribe(model_name, device, compute_type):
+        print(f"[WHISPER] Loading {model_name} on {device}/{compute_type}...")
+        model = WhisperModel(model_name, device=device, compute_type=compute_type)
+        try:
+            print(f"[WHISPER] Transcribing {wav_path}...")
+            segments, info = model.transcribe(
+                str(wav_path),
+                beam_size=5,
+                vad_filter=True,
+                vad_parameters=dict(min_silence_duration_ms=500),
+            )
 
-    print(f"[WHISPER] Transcribing {wav_path}...")
-    segments, info = model.transcribe(
-        str(wav_path),
-        beam_size=5,
-        vad_filter=True,
-        vad_parameters=dict(min_silence_duration_ms=500),
-    )
+            lines = [
+                f"# Meetcap Transcript",
+                f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                f"File: {wav_path.name}",
+                f"Model: {model_name} ({device}/{compute_type})",
+                f"Language: {info.language} ({info.language_probability:.1%})",
+                f"Duration: {info.duration:.1f}s",
+                "",
+                "---",
+                "",
+            ]
 
-    lines = [
-        f"# Meetcap Transcript",
-        f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-        f"File: {wav_path.name}",
-        f"Language: {info.language} ({info.language_probability:.1%})",
-        f"Duration: {info.duration:.1f}s",
-        "",
-        "---",
-        "",
-    ]
+            for seg in segments:
+                start = format_timestamp(seg.start)
+                end = format_timestamp(seg.end)
+                lines.append(f"[{start} → {end}] {seg.text.strip()}")
 
-    for seg in segments:
-        start = format_timestamp(seg.start)
-        end = format_timestamp(seg.end)
-        lines.append(f"[{start} → {end}] {seg.text.strip()}")
+            transcript = "\n".join(lines)
+            txt_path = wav_path.with_suffix(".txt")
+            txt_path.write_text(transcript)
+            print(f"[DONE] {txt_path}")
+            return str(txt_path)
+        finally:
+            del model
+            gc.collect()
 
-    transcript = "\n".join(lines)
-    txt_path = wav_path.with_suffix(".txt")
-    txt_path.write_text(transcript)
-    print(f"[DONE] {txt_path}")
-    return str(txt_path)
+    attempts = []
+    for candidate in [
+        (WHISPER_MODEL, WHISPER_DEVICE, WHISPER_COMPUTE),
+        ("large-v3-turbo", "cuda", "float16"),
+        ("medium", "cuda", "float16"),
+        ("medium", "cpu", "int8"),
+    ]:
+        if candidate not in attempts:
+            attempts.append(candidate)
+
+    last_error = None
+    for idx, (model_name, device, compute_type) in enumerate(attempts, start=1):
+        try:
+            return attempt_transcribe(model_name, device, compute_type)
+        except Exception as e:
+            last_error = e
+            error_text = str(e).lower()
+            retryable_cuda_error = device == "cuda" and any(
+                token in error_text
+                for token in ["out of memory", "cuda failed", "cublas", "cudnn", "cuda"]
+            )
+            print(f"[WHISPER] Attempt {idx}/{len(attempts)} failed: {e}")
+            if retryable_cuda_error and idx < len(attempts):
+                print("[WHISPER] Retrying with safer fallback model/device...")
+                continue
+            raise
+
+    raise last_error
 
 
 def do_transcribe_last():
