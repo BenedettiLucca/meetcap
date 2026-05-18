@@ -258,6 +258,8 @@ def do_transcribe_last():
     try:
         txt = transcribe(wav)
         notify("Meetcap", "✅ Transcript done", os.path.basename(txt))
+        # Auto-export to Obsidian vault with AI summary
+        threading.Thread(target=auto_export, args=(txt,), daemon=True).start()
         with state_lock:
             state.is_transcribing = False
             save_state()
@@ -269,6 +271,27 @@ def do_transcribe_last():
             save_state()
         notify("Meetcap", "❌ Transcription failed", str(e))
         return {"ok": False, "error": str(e)}
+
+
+def auto_export(txt_path: str):
+    """Run export_to_vault.py in a subprocess after transcription."""
+    try:
+        print(f"[EXPORT] Auto-exporting {txt_path} to vault...")
+        notify("Meetcap", "📋 Generating summary...", "Exporting to Obsidian")
+        result = subprocess.run(
+            [sys.executable, str(BASE_DIR / "export_to_vault.py"), txt_path],
+            capture_output=True, text=True, timeout=180,
+            cwd=str(BASE_DIR),
+        )
+        if result.returncode == 0:
+            print(f"[EXPORT] Success: {result.stdout.strip()}")
+            notify("Meetcap", "✅ Exported to vault", "Check your Meetings folder")
+        else:
+            print(f"[EXPORT] Failed: {result.stderr.strip()}")
+            notify("Meetcap", "⚠️ Export failed", result.stderr.strip()[:100])
+    except Exception as e:
+        print(f"[EXPORT] Error: {e}")
+        notify("Meetcap", "⚠️ Export error", str(e)[:100])
 
 
 def transcribe_cmd():
