@@ -1,6 +1,15 @@
 import unittest
+import sys
+from pathlib import Path
+from unittest.mock import patch
 
-import export_to_vault
+# Add src to path so we can import exporter
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+from exporter import task_extractor
+from exporter import transcript_parser
+from exporter import summarizer
+from exporter import vault_exporter
 
 
 class DailyTaskExtractionTests(unittest.TestCase):
@@ -21,7 +30,7 @@ class DailyTaskExtractionTests(unittest.TestCase):
 """
 
         self.assertEqual(
-            export_to_vault.extract_pending_daily_tasks(note),
+            task_extractor.extract_pending_daily_tasks(note),
             ["- [ ] 🔄 lavar a louça", "- [ ] Bio WeeSearch"],
         )
 
@@ -35,7 +44,7 @@ class DailyTaskExtractionTests(unittest.TestCase):
         transcript = "Bio WeeSearch will be updated tomorrow."
 
         self.assertEqual(
-            export_to_vault.compute_explicit_task_matches(pending_tasks, summary, transcript),
+            task_extractor.compute_explicit_task_matches(pending_tasks, summary, transcript),
             ["- [ ] Bio WeeSearch"],
         )
 
@@ -53,7 +62,7 @@ class TaskSuggestionRenderingTests(unittest.TestCase):
             ],
         }
 
-        rendered = export_to_vault.render_task_suggestions(payload)
+        rendered = task_extractor.render_task_suggestions(payload)
 
         self.assertIn("## 🧩 Sugestões de Tarefas", rendered)
         self.assertIn("### 🆕 Novas tarefas sugeridas pela reunião", rendered)
@@ -67,7 +76,7 @@ class TaskSuggestionRenderingTests(unittest.TestCase):
             "not_now_items": {"item": "Live diária", "reason": "é do Aaron"},
         }
 
-        normalized = export_to_vault.normalize_task_suggestion_payload(payload)
+        normalized = task_extractor.normalize_task_suggestion_payload(payload)
 
         self.assertEqual(normalized["matched_tasks"], ["- [ ] Bio WeeSearch"])
         self.assertEqual(normalized["new_suggested_tasks"], [])
@@ -75,6 +84,74 @@ class TaskSuggestionRenderingTests(unittest.TestCase):
             normalized["not_now_items"],
             [{"item": "Live diária", "reason": "é do Aaron"}],
         )
+
+
+class LongMeetingSummaryTests(unittest.TestCase):
+    def test_split_transcript_into_chunks_preserves_order_and_respects_limit(self):
+        transcript = "\n".join(
+            [
+                "[00:00 → 00:05] alpha alpha alpha",
+                "[00:05 → 00:10] beta beta beta",
+                "[00:10 → 00:15] gamma gamma gamma",
+                "[00:15 → 00:20] delta delta delta",
+            ]
+        )
+
+        chunks = transcript_parser.split_transcript_into_chunks(transcript, max_chars=70)
+
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual("\n".join(line for chunk in chunks for line in chunk.splitlines()), transcript)
+        self.assertTrue(all(len(chunk) <= 70 for chunk in chunks))
+
+    @patch("exporter.summarizer.call_openrouter")
+    def test_reduce_chunk_summaries_merges_in_multiple_rounds_when_needed(self, mock_call_openrouter):
+        mock_call_openrouter.side_effect = ["merged-ab", "merged-c", "final-summary"]
+
+        result = summarizer.reduce_chunk_summaries(
+            ["A" * 120, "B" * 120, "C" * 120],
+            merge_max_chars=330,
+        )
+
+        self.assertEqual(result, "final-summary")
+        self.assertEqual(mock_call_openrouter.call_count, 3)
+
+    @patch("exporter.summarizer.call_openrouter")
+    def test_generate_summary_uses_chunk_pipeline_for_long_transcripts(self, mock_call_openrouter):
+        transcript = "\n".join(
+            [
+                "[00:00 → 00:05] alpha alpha alpha alpha",
+                "[00:05 → 00:10] beta beta beta beta",
+                "[00:10 → 00:15] gamma gamma gamma gamma",
+                "[00:15 → 00:20] delta delta delta delta",
+            ]
+        )
+        chunk_summary = (
+            "## 📌 Summary\nChunk summary\n\n"
+            "## 🔑 Key Points\n- Point\n\n"
+            "## ✅ Action Items\n- [ ] Action\n\n"
+            "## ⚠️ Open Questions / Risks\n- Risk"
+        )
+        final_summary = (
+            "## 📌 Summary\nFinal summary\n\n"
+            "## 🔑 Key Points\n- Final point\n\n"
+            "## ✅ Action Items\n- [ ] Final action\n\n"
+            "## ⚠️ Open Questions / Risks\n- Final risk"
+        )
+        mock_call_openrouter.side_effect = [chunk_summary, chunk_summary, final_summary]
+
+        result = summarizer.generate_summary(
+            transcript,
+            single_pass_max_chars=80,
+            chunk_max_chars=90,
+            merge_max_chars=800,
+        )
+
+        self.assertEqual(result, final_summary)
+        self.assertEqual(mock_call_openrouter.call_count, 3)
+        first_user_prompt = mock_call_openrouter.call_args_list[0].kwargs["messages"][1]["content"]
+        final_user_prompt = mock_call_openrouter.call_args_list[-1].kwargs["messages"][1]["content"]
+        self.assertIn("Chunk 1 of 2", first_user_prompt)
+        self.assertIn("chunk summaries", final_user_prompt.lower())
 
 
 class NoteRenderingTests(unittest.TestCase):
@@ -92,7 +169,7 @@ class NoteRenderingTests(unittest.TestCase):
             },
         }
 
-        content = export_to_vault.build_note_content(
+        content = vault_exporter.build_note_content(
             data=data,
             title="Meeting — 2026-05-20 (29 min)",
             summary="## 📌 Summary\nResumo\n",
