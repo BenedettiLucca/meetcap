@@ -106,6 +106,38 @@ Primeira versão não precisa tentar “provar tudo”. Melhor 5 claims boas com
 - como evitar claim inflation / hallucination na camada de extração?
 - a seção deve priorizar decisões, insights de conteúdo, ou qualquer afirmação material?
 
+## 2026-06-08 addendum — Evidence block transfer
+
+O update mais útil aqui é parar de pensar isso só como feature de transcript e começar a tratar como **port do padrão de evidence blocks** que já apareceu em outro contexto do stack.
+
+O `MOIC-MCP` acabou de shippar um bloco enxuto mas muito útil para busca semântica operacional:
+- `authority` por fonte
+- `freshness` por janela de tempo
+- `evidenceMix` no topo do resultado
+
+Esse trio é praticamente o missing layer do Meetcap export. A reunião já sai com resumo e task suggestion; o que falta é o agente downstream saber:
+- o que é **decisão canônica** da sala vs interpretação do resumo
+- o que está **fresh** vs já envelheceu
+- se o export está apoiado em 1-2 trechos fortes ou em um monte de contexto fraco
+
+### Upgrade proposto na feature
+
+Adicionar ao `## 🔎 Claims & Evidence` um mini bloco agregador no topo, algo como:
+
+```markdown
+## Evidence Summary
+- Authority mix: decision-heavy / discussion-heavy / mixed
+- Freshness: same-day / aging / stale follow-up
+- Conflict flag: yes/no
+```
+
+Isso deixa o export mais útil não só para leitura humana, mas para:
+- [[Hermes]]/wiki promotion futura
+- reaproveitamento em proposta/workshop
+- recall de projeto sem reler a transcrição inteira
+
+Em resumo: o ganho não é “resumo mais bonito”. É **hierarquia de evidência portátil**.
+
 ## Why this is better than “just improve the summary”
 
 Porque summary bom ainda é opinativo. Evidence-linked export cria um artefato que outros agentes e o próprio Lucca conseguem reutilizar sem voltar ao raw toda hora.
