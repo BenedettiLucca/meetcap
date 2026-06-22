@@ -4,7 +4,7 @@
 - **Source:** Synapse Diff cron
 - **Status:** idea
 - **Repo remote:** none (local-only fallback)
-- **Project:** `/home/lucca/Projects/meetcap`
+- **Project:** `/path/to/meetcap`
 
 ## Summary
 

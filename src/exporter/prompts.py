@@ -89,11 +89,11 @@ Chunk summaries:
 {chunk_summaries}
 """
 
-TASK_SUGGESTIONS_SYSTEM_PROMPT = """You compare a meeting against Lucca's current daily task list and suggest tasks for manual review.
+TASK_SUGGESTIONS_SYSTEM_PROMPT = """You compare a meeting against the user's current daily task list and suggest tasks for manual review.
 
 Important:
 - This is a manual-review workflow, not an auto-planning workflow.
-- Suggest only tasks that Lucca can copy and paste into "Tasks do Dia".
+- Suggest only tasks that the user can copy and paste into "Tasks do Dia".
 - Be conservative: false negatives are better than false positives.
 - If a task is already clearly present in the daily task list, put it in matched_tasks instead of new_suggested_tasks.
 - Only use matched_tasks when the meeting mentions the SAME deliverable or clearly the same follow-up. Shared theme is not enough.

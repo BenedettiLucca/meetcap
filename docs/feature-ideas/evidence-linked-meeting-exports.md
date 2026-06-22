@@ -4,7 +4,7 @@
 - **Source:** Synapse Diff cron
 - **Status:** idea
 - **Repo remote:** none (local-only fallback)
-- **Project:** `/home/lucca/Projects/meetcap`
+- **Project:** `/path/to/meetcap`
 
 ## Summary
 
@@ -110,7 +110,7 @@ Primeira versão não precisa tentar “provar tudo”. Melhor 5 claims boas com
 
 O update mais útil aqui é parar de pensar isso só como feature de transcript e começar a tratar como **port do padrão de evidence blocks** que já apareceu em outro contexto do stack.
 
-O `MOIC-MCP` acabou de shippar um bloco enxuto mas muito útil para busca semântica operacional:
+Um padrão útil de busca semântica operacional já apareceu em outro contexto do stack:
 - `authority` por fonte
 - `freshness` por janela de tempo
 - `evidenceMix` no topo do resultado
@@ -140,7 +140,7 @@ Em resumo: o ganho não é “resumo mais bonito”. É **hierarquia de evidênc
 
 ## Why this is better than “just improve the summary”
 
-Porque summary bom ainda é opinativo. Evidence-linked export cria um artefato que outros agentes e o próprio Lucca conseguem reutilizar sem voltar ao raw toda hora.
+Porque summary bom ainda é opinativo. Evidence-linked export cria um artefato que outros agentes e o próprio usuário conseguem reutilizar sem voltar ao raw toda hora.
 
 É a diferença entre:
 - “essa reunião foi resumida”

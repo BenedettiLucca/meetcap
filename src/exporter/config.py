@@ -3,7 +3,7 @@ from pathlib import Path
 from datetime import timedelta, timezone
 
 # ── Config ──────────────────────────────────────────────────────────
-VAULT = os.environ.get("OBSIDIAN_VAULT_PATH", "/home/lucca/HD2/vault")
+VAULT = os.environ.get("OBSIDIAN_VAULT_PATH", str(Path.home() / "vault"))
 MEETINGS_DIR = Path(VAULT) / "Meetings"
 TASKS_DIR = Path(VAULT) / "Tasks"
 TASKS_ARCHIVE_DIR = TASKS_DIR / "Archive"

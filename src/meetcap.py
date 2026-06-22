@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 # ── Config ──────────────────────────────────────────────────────────
-BASE_DIR = Path.home() / "Projects" / "meetcap"
+BASE_DIR = Path(__file__).resolve().parent.parent
 RECORDINGS_DIR = BASE_DIR / "recordings"
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
 SOCKET_PATH = Path("/tmp/meetcap.sock")
