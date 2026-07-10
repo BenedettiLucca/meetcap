@@ -4,13 +4,12 @@ After=pipewire.service
 
 [Service]
 Type=simple
-# NOTE: Update these paths and CUDA library paths for your system
-Environment=LD_LIBRARY_PATH=/path/to/.venv/lib/python3.11/site-packages/nvidia/cublas/lib:/path/to/.venv/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib
+Environment=LD_LIBRARY_PATH=/home/lucca/Projects/meetcap/.venv/lib/python3.11/site-packages/nvidia/cublas/lib:/home/lucca/Projects/meetcap/.venv/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib
 Environment=MEETCAP_MODEL=large-v3-turbo
 Environment=MEETCAP_DEVICE=cuda
 Environment=MEETCAP_COMPUTE=float16
 Environment=MEETCAP_LLM_MODEL=deepseek/deepseek-v4-flash
-ExecStart=/path/to/.venv/bin/python /path/to/src/meetcap.py daemon
+ExecStart=/home/lucca/Projects/meetcap/.venv/bin/python /home/lucca/Projects/meetcap/src/meetcap.py daemon
 Restart=on-failure
 RestartSec=3
 
