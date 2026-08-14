@@ -375,9 +375,27 @@ created: "2026-05-20 16:35"
 ### 🆕 Novas tarefas sugeridas pela reunião
 - [ ] ...
 
+## 🔎 Claims & Evidence
+- **Claim:** ...
+  - Why it matters: ...
+  - Evidence: 00:12, 00:18
+  - Confidence: high
+
+## Name Corrections
+- `TechKeyon` -> `Project Tachyon` (high confidence, alias)
+
 ## 📝 Transcrição Completa
 [00:00 → 00:05] ...
 ```
+
+### Export sidecar artifacts
+
+Each export also writes machine-readable sidecars under `Meetings/.meetcap/<note>/`:
+
+- `evidence.json` — schema `meetcap.evidence/1`: verified claims with real transcript timestamps, dropped-claim count, model metadata
+- `corrections.json` — schema `meetcap.corrections/1`: entity-resolver audit trail (surface, canonical, confidence, rule)
+
+The entity resolver builds its canonical vocabulary from `vault/wiki/entities/` and `vault/wiki/concepts/` slugs, an optional `docs/glossary.txt` (one term per line, or `alias = Canonical`) or `docs/glossary.json` (`{"terms": [...], "aliases": {...}}`), plus explicit participant names. Only high-confidence corrections rewrite derived surfaces (summary + task suggestions); medium-confidence matches are flagged, never applied. The raw transcript is never modified.
 
 ---
 

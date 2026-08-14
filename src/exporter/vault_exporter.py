@@ -1,10 +1,21 @@
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from .config import BRT, MEETINGS_DIR, LLM_MODEL
+from .config import BRT, MEETINGS_DIR, ARTIFACTS_DIR, LLM_MODEL
 from .transcript_parser import parse_meetcap_transcript
 from .summarizer import generate_summary
 from .task_extractor import generate_task_suggestions
+from .claim_extractor import (
+    extract_claims,
+    render_claims_block,
+    build_evidence_artifact,
+)
+from .entity_resolver import (
+    load_vocabulary,
+    resolve_derived_surfaces,
+    render_name_corrections,
+)
 
 def build_note_title(data: dict[str, Any], custom_title: str | None = None) -> str:
     """Generate a note title."""
@@ -18,11 +29,16 @@ def build_note_content(
     title: str,
     summary: str,
     task_suggestions: str,
+    claims_block: str = "",
+    corrections_block: str = "",
     now: datetime | None = None,
 ) -> str:
     """Render the final Obsidian note content."""
     meta = data["meta"]
     now = now or datetime.now(BRT)
+
+    claims_section = f"\n{claims_block}\n\n---\n" if claims_block else ""
+    corrections_section = f"\n{corrections_block}\n\n---\n" if corrections_block else ""
 
     return f"""---
 title: "{title}"
@@ -52,7 +68,7 @@ created: "{now.strftime('%Y-%m-%d %H:%M')}"
 {task_suggestions}
 
 ---
-
+{claims_section}{corrections_section}
 ## 📝 Transcrição Completa
 
 {data['transcript_text']}
@@ -85,6 +101,23 @@ def export_note(txt_path: Path, custom_title: str | None = None) -> dict[str, An
     )
     print(f"[EXPORT] Task suggestions generated ({len(task_suggestions)} chars)")
 
+    # Canonical entity resolution: derived surfaces only, raw transcript untouched.
+    vocabulary = load_vocabulary()
+    summary, summary_corrections = resolve_derived_surfaces(summary, vocabulary)
+    task_suggestions, task_corrections = resolve_derived_surfaces(task_suggestions, vocabulary)
+    corrections = summary_corrections + task_corrections
+    corrections_block = render_name_corrections(corrections)
+    if corrections:
+        print(f"[EXPORT] Entity resolver: {len(corrections)} correction(s) flagged")
+
+    print("[EXPORT] Extracting evidence-backed claims...")
+    claims_result = extract_claims(data["segments"], data["transcript_text"])
+    claims_block = render_claims_block(claims_result)
+    print(
+        f"[EXPORT] Claims extracted ({len(claims_result['claims'])} verified, "
+        f"{claims_result['dropped_unresolved']} dropped)"
+    )
+
     title = build_note_title(data, custom_title)
     safe_name = title.replace("/", "-").replace(":", "-")
     filename = f"{safe_name}.md"
@@ -95,11 +128,41 @@ def export_note(txt_path: Path, custom_title: str | None = None) -> dict[str, An
         title=title,
         summary=summary,
         task_suggestions=task_suggestions,
+        claims_block=claims_block,
+        corrections_block=corrections_block,
     )
 
     out_path = MEETINGS_DIR / filename
     out_path.write_text(content, encoding="utf-8")
     print(f"[EXPORT] Saved to {out_path}")
+
+    artifacts: list[str] = []
+    artifact_dir = ARTIFACTS_DIR / safe_name
+    try:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        evidence = build_evidence_artifact(
+            claims_result,
+            meeting_date=data["meeting_date"],
+            transcript_file=data["meta"].get("file", ""),
+        )
+        evidence_path = artifact_dir / "evidence.json"
+        evidence_path.write_text(
+            json.dumps(evidence, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        artifacts.append(str(evidence_path))
+        if corrections:
+            corrections_path = artifact_dir / "corrections.json"
+            corrections_path.write_text(
+                json.dumps(
+                    {"schema": "meetcap.corrections/1", "corrections": corrections},
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            artifacts.append(str(corrections_path))
+    except OSError as exc:
+        print(f"[EXPORT] Artifact write failed: {exc}")
 
     return {
         "success": True,
@@ -108,5 +171,8 @@ def export_note(txt_path: Path, custom_title: str | None = None) -> dict[str, An
         "transcript_lines": data["line_count"],
         "summary_length": len(summary),
         "task_suggestions_length": len(task_suggestions),
+        "claims_verified": len(claims_result["claims"]),
+        "entity_corrections": len(corrections),
+        "artifacts": artifacts,
         "duration": data["duration_str"],
     }

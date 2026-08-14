@@ -144,3 +144,35 @@ Target schema:
   ]
 }
 Use empty arrays when needed."""
+
+CLAIM_EXTRACTION_SYSTEM_PROMPT = """You extract evidence-backed claims from a meeting transcript.
+
+Rules:
+- Extract 3 to 5 claims. Fewer, better-supported claims beat many weak ones.
+- Each claim must be a short, specific insight from the meeting.
+- quote_excerpt MUST be copied VERBATIM from the transcript (5-15 words, exact words, exact spelling).
+- why_it_matters is one short line explaining downstream relevance.
+- confidence is "high", "medium" or "low".
+- Do not invent claims that the transcript does not support.
+- Use the same language as the transcript.
+- Return json only, no markdown fences.
+
+Return valid json with exactly this shape:
+{
+  "claims": [
+    {
+      "claim": "short insight",
+      "why_it_matters": "one line",
+      "quote_excerpt": "verbatim words from the transcript",
+      "confidence": "high"
+    }
+  ]
+}
+Use an empty claims array when nothing is supported. Return json only."""
+
+CLAIM_EXTRACTION_USER_PROMPT = """Extract 3-5 evidence-backed claims from this meeting transcript.
+
+Transcript (timestamped segments):
+{transcript}
+
+Reminder: quote_excerpt must be verbatim transcript words, 5-15 words long, so timestamps can be located mechanically. Return json only."""

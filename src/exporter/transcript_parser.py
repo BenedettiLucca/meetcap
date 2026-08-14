@@ -62,6 +62,25 @@ def split_transcript_into_chunks(transcript_text: str, max_chars: int) -> list[s
 
     return chunks or [transcript_text]
 
+SEGMENT_PATTERN = re.compile(
+    r"^\[(\d{1,2}:\d{2}(?::\d{2})?)\s*(?:→|->|—|to)\s*(\d{1,2}:\d{2}(?::\d{2})?)\]\s*(.*)$"
+)
+
+def parse_transcript_segments(transcript_text: str) -> list[dict[str, Any]]:
+    """Parse timestamped segments ('[MM:SS → MM:SS] text') from transcript text."""
+    segments: list[dict[str, Any]] = []
+    for index, line in enumerate(transcript_text.splitlines()):
+        match = SEGMENT_PATTERN.match(line.strip())
+        if not match:
+            continue
+        segments.append({
+            "index": len(segments),
+            "start": match.group(1),
+            "end": match.group(2),
+            "text": match.group(3).strip(),
+        })
+    return segments
+
 def parse_meetcap_transcript(txt_path: Path) -> dict[str, Any]:
     """Parse meetcap .txt transcript into structured data."""
     raw = txt_path.read_text(encoding="utf-8")
@@ -119,5 +138,6 @@ def parse_meetcap_transcript(txt_path: Path) -> dict[str, Any]:
         "meeting_time": meeting_time,
         "duration_str": duration_str,
         "transcript_text": transcript_text,
+        "segments": parse_transcript_segments(transcript_text),
         "line_count": len([line for line in transcript_lines if line.strip()]),
     }
