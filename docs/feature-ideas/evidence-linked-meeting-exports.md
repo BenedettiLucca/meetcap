@@ -2,9 +2,10 @@
 
 - **Date captured:** 2026-06-05
 - **Source:** Synapse Diff cron
-- **Status:** idea
-- **Repo remote:** none (local-only fallback)
-- **Project:** `/path/to/meetcap`
+- **Status:** tracked
+- **Repo remote:** `https://github.com/BenedettiLucca/meetcap.git`
+- **Project:** `/home/lucca/Projects/meetcap`
+- **Tracking issue:** `#4` — https://github.com/BenedettiLucca/meetcap/issues/4
 
 ## Summary
 
