@@ -1,8 +1,29 @@
 import json
-import subprocess
 from pathlib import Path
 from typing import Any
+
+import httpx
+
 from .config import OPENROUTER_URL, OPENROUTER_KEY, LLM_MODEL
+
+REQUEST_TIMEOUT = httpx.Timeout(300.0, connect=10.0)
+
+
+class LLMError(RuntimeError):
+    """Base class for LLM client failures."""
+
+
+class LLMTransportError(LLMError):
+    """Network-level failure (DNS, connection, read timeout)."""
+
+
+class LLMHTTPError(LLMError):
+    """HTTP-level failure (non-2xx status or API error payload)."""
+
+
+class LLMResponseError(LLMError):
+    """Malformed or unusable response body."""
+
 
 def load_openrouter_key() -> str:
     """Load OpenRouter API key from Hermes .env if not in env."""
@@ -16,6 +37,7 @@ def load_openrouter_key() -> str:
             if line.startswith("OPENROUTER_API_KEY=") and not line.startswith("#"):
                 return line.split("=", 1)[1].strip()
     return ""
+
 
 def should_retry_without_structured_output(error: RuntimeError) -> bool:
     """Decide whether it is worth retrying without response_format."""
@@ -31,6 +53,11 @@ def should_retry_without_structured_output(error: RuntimeError) -> bool:
     )
     return not any(term in message for term in fatal_terms)
 
+
+def _build_client() -> httpx.Client:
+    return httpx.Client(timeout=REQUEST_TIMEOUT)
+
+
 def call_openrouter(
     *,
     messages: list[dict[str, str]],
@@ -42,7 +69,7 @@ def call_openrouter(
     """Call OpenRouter and return the assistant content."""
     api_key = load_openrouter_key()
     if not api_key:
-        raise RuntimeError("no API key configured")
+        raise LLMError("no API key configured")
 
     payload: dict[str, Any] = {
         "model": LLM_MODEL,
@@ -55,45 +82,45 @@ def call_openrouter(
     if response_format is not None:
         payload["response_format"] = response_format
 
-    result = subprocess.run(
-        [
-            "curl",
-            "-sS",
-            "--max-time",
-            "120",
-            OPENROUTER_URL,
-            "-H",
-            f"Authorization: Bearer {api_key}",
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            json.dumps(payload, ensure_ascii=False),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=130,
-    )
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
 
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or f"curl exited with {result.returncode}")
+    with _build_client() as client:
+        try:
+            response = client.post(OPENROUTER_URL, json=payload, headers=headers)
+        except httpx.HTTPError as exc:
+            raise LLMTransportError(f"request failed: {exc}") from exc
 
     try:
-        response = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"invalid JSON response: {exc}") from exc
+        body = response.json()
+    except ValueError as exc:
+        if response.is_error:
+            raise LLMHTTPError(
+                f"HTTP {response.status_code}: {response.text[:300]}"
+            ) from exc
+        raise LLMResponseError(
+            f"invalid JSON response (HTTP {response.status_code}): {exc}"
+        ) from exc
 
-    if response.get("error"):
-        error = response["error"]
+    error = body.get("error")
+    if error:
         message = error.get("message") if isinstance(error, dict) else str(error)
-        raise RuntimeError(message)
+        raise LLMHTTPError(f"HTTP {response.status_code}: {message}")
 
-    choices = response.get("choices") or []
+    if response.is_error:
+        raise LLMHTTPError(
+            f"HTTP {response.status_code}: {response.text[:300]}"
+        )
+
+    choices = body.get("choices") or []
     if not choices:
-        raise RuntimeError("no choices returned")
+        raise LLMResponseError("no choices returned")
 
     message = choices[0].get("message") or {}
     content = message.get("content") or ""
     if not content.strip():
-        raise RuntimeError("empty response content")
+        raise LLMResponseError("empty response content")
 
     return content.strip()
