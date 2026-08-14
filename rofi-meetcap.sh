@@ -1,14 +1,38 @@
 #!/usr/bin/env bash
-# Meetcap rofi menu — send commands to the daemon
+# Meetcap rofi menu — send commands to the daemon, with self-heal recovery
 # Usage: bind to a key in Hyprland
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOCKET="/tmp/meetcap.sock"
 STATE="/tmp/meetcap_state.json"
 
+daemon_ok() {
+    [ -S "$SOCKET" ] && [ -n "$(echo 'status' | socat -t 2 - UNIX-CONNECT:"$SOCKET" 2>/dev/null)" ]
+}
+
+recover() {
+    local choice
+    choice=$(printf "🔄  Restart daemon\n🏥  Run doctor\n❌  Cancel" \
+        | rofi -dmenu -i -p "Meetcap: daemon down" -theme-str 'window { width: 30%; }' 2>/dev/null)
+    case "$choice" in
+        *"Restart"*)
+            notify-send "Meetcap" "Restarting daemon..."
+            "$SCRIPT_DIR/meetcap.sh" restart >/dev/null 2>&1
+            sleep 1
+            ;;
+        *"doctor"*)
+            notify-send "Meetcap — doctor" "$("$SCRIPT_DIR/meetcap.sh" doctor 2>&1 | head -c 400)"
+            ;;
+    esac
+}
+
 send_cmd() {
-    if [ ! -S "$SOCKET" ]; then
-        notify-send "Meetcap" "Daemon not running. Run: meetcap.sh daemon"
-        exit 1
+    if ! daemon_ok; then
+        recover
+        if ! daemon_ok; then
+            notify-send "Meetcap" "Daemon still not responding" "Run: meetcap.sh doctor"
+            exit 1
+        fi
     fi
     echo "$1" | socat - UNIX-CONNECT:"$SOCKET" 2>/dev/null
 }
@@ -43,6 +67,6 @@ case "$choice" in
         send_cmd "transcribe" > /dev/null
         ;;
     *"Open Recordings"*)
-        xdg-open "$HOME/Projects/meetcap/recordings" 2>/dev/null
+        xdg-open "$SCRIPT_DIR/recordings" 2>/dev/null
         ;;
 esac

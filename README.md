@@ -220,13 +220,33 @@ RestartSec=3
 WantedBy=default.target
 ```
 
-Install:
+Install (service-aware):
 
 ```bash
+# Preferred: installs the unit and enables it via systemctl --user
+./meetcap.sh install-service
+
+# Or manually:
 cp meetcap.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now meetcap
 ```
+
+### Daemon lifecycle & troubleshooting
+
+The CLI is service-aware: when the systemd user service is installed, `start`/`restart` go through `systemctl --user`; otherwise the daemon is spawned manually (logged to `/tmp/meetcap-daemon.log`).
+
+```bash
+./meetcap.sh status    # ping + pid + state + how the daemon is managed
+./meetcap.sh start     # start via service (or manual spawn), waits for the socket
+./meetcap.sh restart   # restart via service (or stop + clean + respawn)
+./meetcap.sh doctor    # diagnose: healthy / stale socket / stale PID / wedged daemon
+                        #   / missing service / missing deps / invalid audio source
+./meetcap.sh doctor --fix   # clean stale socket/PID files, then re-diagnose
+./meetcap.sh doctor --json  # machine-readable diagnosis
+```
+
+The rofi menu also self-heals: if the daemon does not respond, it offers 🔄 Restart daemon or 🏥 Run doctor instead of dead-ending.
 
 ### 4. Bind rofi menu to a key (Hyprland example)
 
@@ -272,6 +292,9 @@ Tests cover all core business logic with mocked LLM calls (no API key needed for
 - `transcript_parser`: chunking of long transcripts (order preservation, character limits)
 - `summarizer`: multi-round chunk pipeline (split → reduce → merge) with mocked OpenRouter
 - `vault_exporter`: note rendering (task suggestions positioned before transcript)
+- `llm_client`: transport/HTTP/response failure classification, retry decisions (httpx mocked)
+- `doctor`: health classification (stale socket/PID, wedged daemon, missing deps, invalid source)
+- `meetcap` daemon: command handling, recording state, socket client (OS-level calls mocked)
 
 ---
 

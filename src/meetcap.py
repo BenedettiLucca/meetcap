@@ -11,12 +11,15 @@ import os
 import sys
 import json
 import signal
+import shutil
 import socket
 import subprocess
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
+
+import doctor
 
 # ── Config ──────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -64,7 +67,7 @@ def get_audio_sources():
             ["pactl", "get-default-sink"], text=True
         ).strip()
         return default_mic, default_sink + ".monitor"
-    except Exception as e:
+    except (OSError, subprocess.SubprocessError):
         return None, None
 
 
@@ -108,7 +111,7 @@ def start_recording():
             error_tail = ""
             try:
                 error_tail = "\n".join(log_file.read_text(errors="replace").splitlines()[-8:])
-            except Exception:
+            except OSError:
                 pass
             state.last_error = f"ffmpeg exited immediately ({state.recording_proc.returncode})"
             if error_tail:
@@ -280,7 +283,7 @@ def auto_export(txt_path: str):
         notify("Meetcap", "📋 Generating summary...", "Exporting to Obsidian")
         result = subprocess.run(
             [sys.executable, str(BASE_DIR / "export_to_vault.py"), txt_path],
-            capture_output=True, text=True, timeout=180,
+            capture_output=True, text=True, timeout=600,
             cwd=str(BASE_DIR),
         )
         if result.returncode == 0:
@@ -289,16 +292,34 @@ def auto_export(txt_path: str):
         else:
             print(f"[EXPORT] Failed: {result.stderr.strip()}")
             notify("Meetcap", "⚠️ Export failed", result.stderr.strip()[:100])
-    except Exception as e:
+    except (OSError, subprocess.SubprocessError) as e:
         print(f"[EXPORT] Error: {e}")
         notify("Meetcap", "⚠️ Export error", str(e)[:100])
 
+
+def _reset_transcribing_on_fail():
+    """Clear stuck transcribing state and notify."""
+    with state_lock:
+        state.is_transcribing = False
+        save_state()
+    notify("Meetcap", "❌ Transcription failed", "Check logs for details")
+    print("[WATCHDOG] Cleared stuck transcribing state")
 
 def transcribe_cmd():
     """Handle transcribe command — runs in background."""
     if state.is_recording:
         return {"ok": False, "error": "Stop recording first"}
-    threading.Thread(target=do_transcribe_last, daemon=True).start()
+    t = threading.Thread(target=do_transcribe_last, daemon=True)
+    t.start()
+    # Start watchdog: if thread dies without resetting is_transcribing, clear it
+    def watchdog():
+        t.join(timeout=3600)
+        with state_lock:
+            if state.is_transcribing:
+                state.is_transcribing = False
+                save_state()
+                notify("Meetcap", "⚠️ Transcription watchdog triggered", "Thread finished but state was stuck")
+    threading.Thread(target=watchdog, daemon=True).start()
     return {"ok": True, "status": "transcription started"}
 
 
@@ -309,7 +330,7 @@ def notify(title, body, subtitle=""):
         if subtitle:
             cmd.append(subtitle)
         subprocess.run(cmd, timeout=3, capture_output=True)
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         pass
 
 
@@ -350,10 +371,10 @@ def client_handler(conn):
         if data:
             response = handle_command(data)
             conn.sendall((json.dumps(response) + "\n").encode())
-    except Exception as e:
+    except (OSError, UnicodeDecodeError) as e:
         try:
             conn.sendall((json.dumps({"ok": False, "error": str(e)}) + "\n").encode())
-        except Exception:
+        except OSError:
             pass
     finally:
         conn.close()
@@ -406,11 +427,8 @@ def run_server():
 
 
 # ── CLI ──────────────────────────────────────────────────────────────
-def send_command(cmd):
-    """Send a command to the daemon and return the response."""
-    if not SOCKET_PATH.exists():
-        print("Meetcap daemon is not running", file=sys.stderr)
-        sys.exit(1)
+def _send(cmd):
+    """Send a command to the daemon and return the raw response, or None."""
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.connect(str(SOCKET_PATH))
@@ -418,14 +436,127 @@ def send_command(cmd):
         data = s.recv(4096).decode().strip()
         s.close()
         return data
-    except Exception as e:
-        print(f"Error communicating with daemon: {e}", file=sys.stderr)
+    except OSError:
+        return None
+
+
+def send_command(cmd):
+    """Send a command to the daemon and return the response."""
+    if not SOCKET_PATH.exists():
+        print("Meetcap daemon is not running", file=sys.stderr)
         sys.exit(1)
+    data = _send(cmd)
+    if data is None:
+        print("Error communicating with daemon", file=sys.stderr)
+        sys.exit(1)
+    return data
+
+
+# ── Bootstrap / doctor CLI ───────────────────────────────────────────
+def wait_for_socket(timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if doctor.ping_socket(SOCKET_PATH):
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def doctor_cmd(args):
+    diagnosis = doctor.diagnose(SOCKET_PATH, PID_FILE)
+    if "--fix" in args and diagnosis["status"] in (doctor.STALE_SOCKET, doctor.STALE_PID):
+        for removed in doctor.clean_stale_files(SOCKET_PATH, PID_FILE):
+            print(f"[DOCTOR] Removed stale file: {removed}")
+        diagnosis = doctor.diagnose(SOCKET_PATH, PID_FILE)
+    if "--json" in args:
+        print(json.dumps(diagnosis, indent=2))
+    else:
+        print(doctor.format_report(diagnosis))
+    sys.exit(0 if diagnosis["status"] == doctor.HEALTHY else 1)
+
+
+def status_cmd():
+    if not doctor.ping_socket(SOCKET_PATH):
+        diagnosis = doctor.diagnose(SOCKET_PATH, PID_FILE)
+        print(doctor.format_report(diagnosis))
+        sys.exit(1)
+    daemon_status = _send("status")
+    svc = doctor.check_service()
+    pid = doctor.read_pid(PID_FILE)
+    print(f"Daemon: running (pid {pid})")
+    if daemon_status:
+        print(f"State: {daemon_status}")
+    mode = "systemd user service" if svc["active"] else "manual"
+    print(f"Managed via: {mode}")
+
+
+def _spawn_manual_daemon():
+    doctor.clean_stale_files(SOCKET_PATH, PID_FILE)
+    log_path = Path("/tmp/meetcap-daemon.log")
+    with log_path.open("ab") as log:
+        subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "daemon"],
+            stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+            start_new_session=True,
+        )
+    print(f"[START] Daemon launched in background (log: {log_path})")
+
+
+def start_cmd():
+    if doctor.ping_socket(SOCKET_PATH):
+        print("Daemon already running")
+        return
+    svc = doctor.check_service()
+    if svc["installed"]:
+        if doctor.service_start():
+            print("[START] systemctl --user start meetcap")
+        else:
+            print("[START] systemctl start failed; run: meetcap.sh doctor", file=sys.stderr)
+            sys.exit(1)
+    else:
+        _spawn_manual_daemon()
+    if wait_for_socket():
+        print("[START] Daemon is up")
+    else:
+        print("[START] Daemon did not come up; run: meetcap.sh doctor", file=sys.stderr)
+        sys.exit(1)
+
+
+def restart_cmd():
+    svc = doctor.check_service()
+    if svc["installed"]:
+        if doctor.service_restart():
+            print("[RESTART] systemctl --user restart meetcap")
+        else:
+            print("[RESTART] systemctl restart failed; run: meetcap.sh doctor", file=sys.stderr)
+            sys.exit(1)
+    else:
+        pid = doctor.read_pid(PID_FILE)
+        if doctor.stop_pid(pid):
+            print("[RESTART] Stopped old daemon")
+        doctor.clean_stale_files(SOCKET_PATH, PID_FILE)
+        _spawn_manual_daemon()
+    if wait_for_socket():
+        print("[RESTART] Daemon is up")
+    else:
+        print("[RESTART] Daemon did not come up; run: meetcap.sh doctor", file=sys.stderr)
+        sys.exit(1)
+
+
+def install_service_cmd():
+    unit = BASE_DIR / "meetcap.service"
+    try:
+        dest = doctor.install_service(unit)
+    except (OSError, shutil.Error) as e:
+        print(f"[INSTALL] Failed to install service: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"[INSTALL] Installed {dest}")
+    print("[INSTALL] Enabled + started via systemctl --user enable --now meetcap")
 
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: meetcap.py <daemon|status|record|stop|toggle|transcribe|list>")
+        print("Usage: meetcap.py <daemon|doctor|status|start|restart|install-service|record|stop|toggle|transcribe|list>")
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -435,6 +566,16 @@ def main():
         print(f"  Recordings: {RECORDINGS_DIR}")
         print(f"  Whisper: {WHISPER_MODEL} on {WHISPER_DEVICE}")
         run_server()
+    elif cmd == "doctor":
+        doctor_cmd(sys.argv[2:])
+    elif cmd == "status":
+        status_cmd()
+    elif cmd == "start":
+        start_cmd()
+    elif cmd == "restart":
+        restart_cmd()
+    elif cmd == "install-service":
+        install_service_cmd()
     else:
         # Client mode — send command to daemon
         response = send_command(cmd)
