@@ -384,6 +384,20 @@ created: "2026-05-20 16:35"
 ## Name Corrections
 - `TechKeyon` -> `Project Tachyon` (high confidence, alias)
 
+## 🚩 QA Flags
+- Coverage score: 0.42
+- Needs review: yes
+- Missing decisions: 1
+- Action item gaps: 2
+- Attribution risks: 0
+- Unsupported claims: 1
+
+## 🗺️ Room Manifest
+- Authority mix: decision-heavy
+- Freshness: same-day
+- Best used for: task carry-over, wiki update
+- Decisions: 2 · Open questions: 1 · Actions: 3
+
 ## 📝 Transcrição Completa
 [00:00 → 00:05] ...
 ```
@@ -394,8 +408,18 @@ Each export also writes machine-readable sidecars under `Meetings/.meetcap/<note
 
 - `evidence.json` — schema `meetcap.evidence/1`: verified claims with real transcript timestamps, dropped-claim count, model metadata
 - `corrections.json` — schema `meetcap.corrections/1`: entity-resolver audit trail (surface, canonical, confidence, rule)
+- `verification.json` / `verification.md` — schema `meetcap.verification/1`: QA pass results (coverage score, decision/action gaps, attribution risks, unsupported claims)
+- `room_manifest.json` — schema `meetcap.room-manifest/1`: routing metadata for downstream agents (authority mix, freshness, decisions, open questions, actions, missing proof, downstream lanes)
 
 The entity resolver builds its canonical vocabulary from `vault/wiki/entities/` and `vault/wiki/concepts/` slugs, an optional `docs/glossary.txt` (one term per line, or `alias = Canonical`) or `docs/glossary.json` (`{"terms": [...], "aliases": {...}}`), plus explicit participant names. Only high-confidence corrections rewrite derived surfaces (summary + task suggestions); medium-confidence matches are flagged, never applied. The raw transcript is never modified.
+
+### QA verification pass
+
+After building the note, an advisory QA pass (`note_verifier`) judges it against the timestamped transcript: coverage score (0–1), missing decisions, action-item gaps, speaker attribution risks, and unsupported claims — each pointing back to the timestamps where the gap occurred. It never blocks or rewrites the export; risky notes get a compact `## 🚩 QA Flags` block and full details land in `verification.json`/`verification.md`. Disable with `MEETCAP_EXPORT_QA=0`.
+
+### Room manifest
+
+Each export also emits a routing manifest (`room_manifest.json` + a compact `## 🗺️ Room Manifest` note block) for downstream agents (Hermes). It reuses the evidence claims and QA verification instead of re-deriving them: authority mix (decision-heavy / discussion-heavy / mixed), freshness (same-day / aging / stale-follow-up), decisions, open questions, checkbox actions, missing proof, and suggested downstream lanes (`daily-tasks`, `wiki`, `content`, `client-followup`, `reference-only`). Low-confidence material (poor QA coverage and no decisions) routes to `reference-only` only. Disable with `MEETCAP_EXPORT_MANIFEST=0`.
 
 ---
 

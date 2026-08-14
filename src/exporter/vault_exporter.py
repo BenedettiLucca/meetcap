@@ -2,7 +2,14 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from .config import BRT, MEETINGS_DIR, ARTIFACTS_DIR, LLM_MODEL
+from .config import (
+    BRT,
+    MEETINGS_DIR,
+    ARTIFACTS_DIR,
+    LLM_MODEL,
+    EXPORT_QA_ENABLED,
+    EXPORT_MANIFEST_ENABLED,
+)
 from .transcript_parser import parse_meetcap_transcript
 from .summarizer import generate_summary
 from .task_extractor import generate_task_suggestions
@@ -15,6 +22,16 @@ from .entity_resolver import (
     load_vocabulary,
     resolve_derived_surfaces,
     render_name_corrections,
+)
+from .note_verifier import (
+    verify_export,
+    render_qa_block,
+    render_verification_md,
+    build_verification_artifact,
+)
+from .room_manifest import (
+    build_room_manifest,
+    render_manifest_block,
 )
 
 def build_note_title(data: dict[str, Any], custom_title: str | None = None) -> str:
@@ -31,6 +48,8 @@ def build_note_content(
     task_suggestions: str,
     claims_block: str = "",
     corrections_block: str = "",
+    qa_block: str = "",
+    manifest_block: str = "",
     now: datetime | None = None,
 ) -> str:
     """Render the final Obsidian note content."""
@@ -39,6 +58,8 @@ def build_note_content(
 
     claims_section = f"\n{claims_block}\n\n---\n" if claims_block else ""
     corrections_section = f"\n{corrections_block}\n\n---\n" if corrections_block else ""
+    qa_section = f"\n{qa_block}\n\n---\n" if qa_block else ""
+    manifest_section = f"\n{manifest_block}\n\n---\n" if manifest_block else ""
 
     return f"""---
 title: "{title}"
@@ -68,7 +89,7 @@ created: "{now.strftime('%Y-%m-%d %H:%M')}"
 {task_suggestions}
 
 ---
-{claims_section}{corrections_section}
+{claims_section}{corrections_section}{qa_section}{manifest_section}
 ## 📝 Transcrição Completa
 
 {data['transcript_text']}
@@ -121,6 +142,56 @@ def export_note(txt_path: Path, custom_title: str | None = None) -> dict[str, An
     title = build_note_title(data, custom_title)
     safe_name = title.replace("/", "-").replace(":", "-")
     filename = f"{safe_name}.md"
+    out_path = MEETINGS_DIR / filename
+
+    verification: dict[str, Any] = {
+        "coverage_score": None, "needs_human_review": False, "error": None,
+        "decision_gaps": [], "action_item_gaps": [],
+        "speaker_attribution_risks": [], "unsupported_claims": [],
+        "recommended_note_additions": [],
+    }
+    manifest: dict[str, Any] | None = None
+    qa_block = ""
+    manifest_block = ""
+
+    if EXPORT_QA_ENABLED:
+        print("[EXPORT] Running QA verification pass...")
+        note_surfaces = "\n\n".join(
+            part for part in (summary, claims_block, task_suggestions) if part
+        )
+        verification = verify_export(
+            data["segments"],
+            note_surfaces,
+            task_suggestions,
+            context={
+                "meeting_date": data["meeting_date"],
+                "title": title,
+                "model": LLM_MODEL,
+            },
+        )
+        qa_block = render_qa_block(verification)
+        if verification.get("error"):
+            print(f"[EXPORT] QA verification degraded: {verification['error']}")
+        else:
+            print(
+                f"[EXPORT] QA coverage {verification['coverage_score']} "
+                f"(needs review: {verification['needs_human_review']})"
+            )
+
+    if EXPORT_MANIFEST_ENABLED:
+        print("[EXPORT] Building room manifest...")
+        manifest = build_room_manifest(
+            segments=data["segments"],
+            summary=summary,
+            task_suggestions=task_suggestions,
+            claims_result=claims_result,
+            verification=verification,
+            meeting_date=data["meeting_date"],
+            title=title,
+            note_path=str(out_path),
+        )
+        manifest_block = render_manifest_block(manifest)
+        print(f"[EXPORT] Room manifest lanes: {manifest['downstreamLanes']}")
 
     MEETINGS_DIR.mkdir(parents=True, exist_ok=True)
     content = build_note_content(
@@ -130,9 +201,10 @@ def export_note(txt_path: Path, custom_title: str | None = None) -> dict[str, An
         task_suggestions=task_suggestions,
         claims_block=claims_block,
         corrections_block=corrections_block,
+        qa_block=qa_block,
+        manifest_block=manifest_block,
     )
 
-    out_path = MEETINGS_DIR / filename
     out_path.write_text(content, encoding="utf-8")
     print(f"[EXPORT] Saved to {out_path}")
 
@@ -161,6 +233,33 @@ def export_note(txt_path: Path, custom_title: str | None = None) -> dict[str, An
                 encoding="utf-8",
             )
             artifacts.append(str(corrections_path))
+        if EXPORT_QA_ENABLED:
+            verification_path = artifact_dir / "verification.json"
+            verification_path.write_text(
+                json.dumps(
+                    build_verification_artifact(
+                        verification,
+                        meeting_date=data["meeting_date"],
+                        transcript_file=data["meta"].get("file", ""),
+                    ),
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            artifacts.append(str(verification_path))
+            verification_md_path = artifact_dir / "verification.md"
+            verification_md_path.write_text(
+                render_verification_md(verification), encoding="utf-8"
+            )
+            artifacts.append(str(verification_md_path))
+        if EXPORT_MANIFEST_ENABLED and manifest is not None:
+            manifest_path = artifact_dir / "room_manifest.json"
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            artifacts.append(str(manifest_path))
     except OSError as exc:
         print(f"[EXPORT] Artifact write failed: {exc}")
 
@@ -173,6 +272,9 @@ def export_note(txt_path: Path, custom_title: str | None = None) -> dict[str, An
         "task_suggestions_length": len(task_suggestions),
         "claims_verified": len(claims_result["claims"]),
         "entity_corrections": len(corrections),
+        "qa_needs_review": verification.get("needs_human_review", False),
+        "qa_coverage_score": verification.get("coverage_score"),
+        "downstream_lanes": manifest["downstreamLanes"] if manifest else [],
         "artifacts": artifacts,
         "duration": data["duration_str"],
     }

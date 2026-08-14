@@ -35,6 +35,27 @@ CLAIMS_RESULT = {
     "error": None,
 }
 
+VERIFICATION_STUB = {
+    "coverage_score": 0.91, "needs_human_review": False, "error": None,
+    "decision_gaps": [], "action_item_gaps": [],
+    "speaker_attribution_risks": [], "unsupported_claims": [],
+    "recommended_note_additions": [],
+}
+
+MANIFEST_STUB = {
+    "schema": "meetcap.room-manifest/1",
+    "meeting": {"title": "Alignment", "date": "2026-08-14", "participants": [], "canonical_note_path": "x.md"},
+    "authorityMix": "decision-heavy",
+    "freshness": "same-day",
+    "decisions": ["adopt rail"],
+    "openQuestions": ["owner?"],
+    "actions": ["notify client"],
+    "claims": [{"claim": "Adopt rail", "timestamps": ["00:00"]}],
+    "missingProof": [],
+    "downstreamLanes": ["daily-tasks", "wiki"],
+    "error": None,
+}
+
 CORRECTIONS = [{
     "surface": "TechKeyon",
     "canonical": "Project Tachyon",
@@ -72,6 +93,8 @@ class ExportNoteArtifactsTests(unittest.TestCase):
                 ),
             ),
             patch.object(vault_exporter, "load_vocabulary", return_value={"canonical": [], "aliases": {}}),
+            patch.object(vault_exporter, "EXPORT_QA_ENABLED", False),
+            patch.object(vault_exporter, "EXPORT_MANIFEST_ENABLED", False),
         ]
         for item in patches:
             item.start()
@@ -136,6 +159,8 @@ class ExportNoteDegradedTests(unittest.TestCase):
             patch.object(vault_exporter, "generate_task_suggestions", return_value="## 🧩 Sugestões"),
             patch.object(vault_exporter, "extract_claims", return_value=failing),
             patch.object(vault_exporter, "load_vocabulary", return_value={"canonical": [], "aliases": {}}),
+            patch.object(vault_exporter, "EXPORT_QA_ENABLED", False),
+            patch.object(vault_exporter, "EXPORT_MANIFEST_ENABLED", False),
         ]
         for item in patches:
             item.start()
@@ -148,6 +173,86 @@ class ExportNoteDegradedTests(unittest.TestCase):
         evidence = json.loads(Path(result["artifacts"][0]).read_text(encoding="utf-8"))
         self.assertEqual(evidence["claims"], [])
         self.assertIn("no key", evidence["error"])
+
+
+class QaManifestWiringTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.meetings = Path(self.tmp.name) / "Meetings"
+
+    def _export(self, verification, manifest):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as handle:
+            handle.write(TRANSCRIPT)
+            transcript = Path(handle.name)
+        self.addCleanup(transcript.unlink)
+
+        patches = [
+            patch.object(vault_exporter, "MEETINGS_DIR", self.meetings),
+            patch.object(vault_exporter, "ARTIFACTS_DIR", self.meetings / ".meetcap"),
+            patch.object(vault_exporter, "generate_summary", return_value="## 📌 Summary"),
+            patch.object(vault_exporter, "generate_task_suggestions", return_value="## 🧩 Sugestões\n- [ ] item"),
+            patch.object(vault_exporter, "extract_claims", return_value=dict(CLAIMS_RESULT)),
+            patch.object(vault_exporter, "load_vocabulary", return_value={"canonical": [], "aliases": {}}),
+            patch.object(vault_exporter, "EXPORT_QA_ENABLED", True),
+            patch.object(vault_exporter, "EXPORT_MANIFEST_ENABLED", True),
+            patch.object(vault_exporter, "verify_export", return_value=verification),
+            patch.object(vault_exporter, "build_room_manifest", return_value=manifest),
+        ]
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+        return vault_exporter.export_note(transcript, "QA Wiring")
+
+    def test_clean_export_omits_qa_block_but_writes_manifest(self):
+        result = self._export(dict(VERIFICATION_STUB), dict(MANIFEST_STUB))
+        self.assertTrue(result["success"])
+        content = Path(result["path"]).read_text(encoding="utf-8")
+        self.assertIn("## 🗺️ Room Manifest", content)
+        self.assertNotIn("## 🚩 QA Flags", content)
+        # order: claims -> corrections(absent) -> qa(absent) -> manifest -> transcript
+        self.assertLess(content.index("## 🔎 Claims"), content.index("## 🗺️ Room Manifest"))
+        self.assertLess(content.index("## 🗺️ Room Manifest"), content.index("## 📝 Transcrição Completa"))
+        self.assertEqual(result["downstream_lanes"], ["daily-tasks", "wiki"])
+        self.assertFalse(result["qa_needs_review"])
+        self.assertEqual(result["qa_coverage_score"], 0.91)
+
+    def test_risky_export_renders_qa_flags_block(self):
+        verification = dict(
+            VERIFICATION_STUB, coverage_score=0.4, needs_human_review=True,
+            decision_gaps=["budget owner missing"],
+        )
+        result = self._export(verification, dict(MANIFEST_STUB))
+        content = Path(result["path"]).read_text(encoding="utf-8")
+        self.assertIn("## 🚩 QA Flags", content)
+        self.assertIn("Coverage score: 0.40", content)
+        self.assertTrue(result["qa_needs_review"])
+        self.assertLess(content.index("## 🚩 QA Flags"), content.index("## 🗺️ Room Manifest"))
+
+    def test_verification_and_manifest_artifacts_written(self):
+        result = self._export(dict(VERIFICATION_STUB), dict(MANIFEST_STUB))
+        names = [Path(p).name for p in result["artifacts"]]
+        self.assertIn("evidence.json", names)
+        self.assertIn("verification.json", names)
+        self.assertIn("verification.md", names)
+        self.assertIn("room_manifest.json", names)
+        verification = json.loads(
+            (Path(result["artifacts"][0]).parent / "verification.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(verification["schema"], "meetcap.verification/1")
+        manifest = json.loads(
+            (Path(result["artifacts"][0]).parent / "room_manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["schema"], "meetcap.room-manifest/1")
+
+    def test_degraded_verification_renders_warning_not_crash(self):
+        verification = dict(
+            VERIFICATION_STUB, coverage_score=None, error="verification failed: no key",
+        )
+        result = self._export(verification, dict(MANIFEST_STUB))
+        content = Path(result["path"]).read_text(encoding="utf-8")
+        self.assertIn("[!warning] QA verification unavailable", content)
+        self.assertIsNone(result["qa_coverage_score"])
 
 
 class BuildNoteContentDefaultsTests(unittest.TestCase):
