@@ -77,6 +77,18 @@ class RecordingCommandTests(unittest.TestCase):
         mock_stop.assert_called_once()
         self.assertTrue(result["ok"])
 
+    def test_transcribe_while_recording_fails(self):
+        meetcap.state.is_recording = True
+        result = meetcap.handle_command("transcribe")
+        self.assertFalse(result["ok"])
+        self.assertIn("Stop recording first", result["error"])
+
+    def test_transcribe_dispatches_when_idle(self):
+        with patch("meetcap.transcribe_cmd", return_value={"ok": True, "status": "started"}) as mock_cmd:
+            result = meetcap.handle_command("transcribe")
+        mock_cmd.assert_called_once()
+        self.assertTrue(result["ok"])
+
     def test_unknown_command_returns_error(self):
         result = meetcap.handle_command("bogus")
         self.assertFalse(result["ok"])
