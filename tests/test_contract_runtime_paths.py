@@ -118,10 +118,12 @@ class RuntimePathsContractTests(unittest.TestCase):
         import importlib
 
         # Two different XDG dirs must produce different socket paths.
-        with patch.dict(os.environ, {"XDG_RUNTIME_DIR": "/run/user/1000"}):
+        # MEETCAP_RUNTIME_DIR is neutralized: it outranks XDG and would mask
+        # the isolation being tested when exported in the ambient environment.
+        with patch.dict(os.environ, {"XDG_RUNTIME_DIR": "/run/user/1000", "MEETCAP_RUNTIME_DIR": ""}):
             importlib.reload(runtime_paths)
             path_a = runtime_paths.socket_path()
-        with patch.dict(os.environ, {"XDG_RUNTIME_DIR": "/run/user/1001"}):
+        with patch.dict(os.environ, {"XDG_RUNTIME_DIR": "/run/user/1001", "MEETCAP_RUNTIME_DIR": ""}):
             importlib.reload(runtime_paths)
             path_b = runtime_paths.socket_path()
         self.assertNotEqual(path_a, path_b)
