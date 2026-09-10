@@ -1,3 +1,5 @@
+import json
+import tempfile
 import unittest
 import sys
 from pathlib import Path
@@ -10,6 +12,8 @@ from exporter import task_extractor
 from exporter import transcript_parser
 from exporter import summarizer
 from exporter import vault_exporter
+from exporter import config
+from exporter import prompts
 
 
 class DailyTaskExtractionTests(unittest.TestCase):
@@ -178,6 +182,115 @@ class NoteRenderingTests(unittest.TestCase):
 
         self.assertLess(content.index("## 🧩 Sugestões de Tarefas"), content.index("## 📝 Transcrição Completa"))
         self.assertIn("- [ ] Nova task", content)
+
+
+CANARY_PRIVACY_A = "CANARY-SECRET-CLIENT-AUDIT-48291"
+CANARY_PRIVACY_B = "CANARY-SECRET-FINANCIAL-REVIEW-77123"
+
+
+class TaskPrivacyTests(unittest.TestCase):
+    """CT-7 / #25: Daily tasks must remain local and never leak into LLM prompts."""
+
+    def test_daily_tasks_canaries_absent_from_openrouter_messages(self):
+        """Unique canary tokens in daily tasks must not appear in the messages payload sent to call_openrouter."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tasks_dir = Path(tmp) / "Tasks"
+            tasks_dir.mkdir()
+            daily_note = tasks_dir / "Tasks — 2026-09-10.md"
+            daily_note.write_text(
+                "# Tasks — 2026-09-10\n\n"
+                "## 📋 Tasks do Dia\n"
+                f"- [ ] {CANARY_PRIVACY_A}\n"
+                f"- [ ] {CANARY_PRIVACY_B}\n"
+                "- [ ] Ordinary local task\n",
+                encoding="utf-8",
+            )
+
+            captured_messages = []
+
+            def capturing_call(*, messages, **kwargs):
+                captured_messages.append(messages)
+                return json.dumps({
+                    "matched_tasks": [],
+                    "new_suggested_tasks": ["- [ ] Propose follow-up meeting"],
+                    "not_now_items": [{"item": "Upgrade server", "reason": "belongs to ops"}],
+                })
+
+            with patch.object(task_extractor, "TASKS_DIR", tasks_dir), \
+                 patch.object(task_extractor, "TASKS_ARCHIVE_DIR", tasks_dir / "Archive"), \
+                 patch.object(task_extractor, "call_openrouter", side_effect=capturing_call):
+                result = task_extractor.generate_task_suggestions(
+                    meeting_date="2026-09-10",
+                    summary="## 📌 Summary\nDiscussed roadmap and server status.",
+                    transcript_text="[00:00 → 00:30] We talked about the roadmap and ops tasks.",
+                )
+
+            self.assertIn("## 🧩 Sugestões de Tarefas", result)
+            self.assertIn("- [ ] Propose follow-up meeting", result)
+            self.assertIn("- Upgrade server — belongs to ops", result)
+
+            serialized = json.dumps(captured_messages)
+            self.assertNotIn(CANARY_PRIVACY_A, serialized)
+            self.assertNotIn(CANARY_PRIVACY_B, serialized)
+            self.assertNotIn("Ordinary local task", serialized)
+
+    def test_local_matching_works_with_pending_tasks_without_sending_them(self):
+        """Local matching against daily tasks works correctly while prompt payload remains clean."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tasks_dir = Path(tmp) / "Tasks"
+            tasks_dir.mkdir()
+            daily_note = tasks_dir / "Tasks — 2026-09-10.md"
+            daily_note.write_text(
+                "# Tasks — 2026-09-10\n\n"
+                "## 📋 Tasks do Dia\n"
+                "- [ ] Review Q3 budget proposal\n"
+                f"- [ ] {CANARY_PRIVACY_A}\n",
+                encoding="utf-8",
+            )
+
+            captured_messages = []
+
+            def capturing_call(*, messages, **kwargs):
+                captured_messages.append(messages)
+                return json.dumps({
+                    "matched_tasks": [],
+                    "new_suggested_tasks": ["- [ ] Send summary email"],
+                    "not_now_items": [],
+                })
+
+            with patch.object(task_extractor, "TASKS_DIR", tasks_dir), \
+                 patch.object(task_extractor, "TASKS_ARCHIVE_DIR", tasks_dir / "Archive"), \
+                 patch.object(task_extractor, "call_openrouter", side_effect=capturing_call):
+                result = task_extractor.generate_task_suggestions(
+                    meeting_date="2026-09-10",
+                    summary="## 📌 Summary\nWe decided to Review Q3 budget proposal today.",
+                    transcript_text="[00:00 → 00:15] Let's Review Q3 budget proposal.",
+                )
+
+            self.assertIn("- [ ] Review Q3 budget proposal", result)
+            self.assertIn("- [ ] Send summary email", result)
+
+            serialized = json.dumps(captured_messages)
+            self.assertNotIn(CANARY_PRIVACY_A, serialized)
+            self.assertNotIn("Current daily tasks", serialized)
+
+    def test_task_prompts_schema_and_formatting(self):
+        """TASK_SUGGESTIONS_USER_PROMPT must format without daily_tasks."""
+        formatted = prompts.TASK_SUGGESTIONS_USER_PROMPT.format(
+            meeting_date="2026-09-10",
+            summary="Meeting summary text",
+            transcript_excerpt="Transcript excerpt text",
+        )
+        self.assertIn("2026-09-10", formatted)
+        self.assertIn("Meeting summary text", formatted)
+        self.assertIn("Transcript excerpt text", formatted)
+        self.assertNotIn("{daily_tasks}", formatted)
+
+    def test_task_transcript_max_chars_config(self):
+        """TASK_SUGGESTIONS_TRANSCRIPT_MAX_CHARS must be configured and positive integer."""
+        self.assertTrue(hasattr(config, "TASK_SUGGESTIONS_TRANSCRIPT_MAX_CHARS"))
+        self.assertIsInstance(config.TASK_SUGGESTIONS_TRANSCRIPT_MAX_CHARS, int)
+        self.assertGreater(config.TASK_SUGGESTIONS_TRANSCRIPT_MAX_CHARS, 0)
 
 
 if __name__ == "__main__":

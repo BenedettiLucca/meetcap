@@ -8,6 +8,7 @@ from .config import (
     TASKS_ARCHIVE_DIR,
     TASK_SUGGESTIONS_MAX_TOKENS,
     TASK_SUGGESTIONS_TEMPERATURE,
+    TASK_SUGGESTIONS_TRANSCRIPT_MAX_CHARS,
 )
 from .prompts import (
     TASK_SUGGESTIONS_SYSTEM_PROMPT,
@@ -216,8 +217,12 @@ def generate_task_suggestions(meeting_date: str, summary: str, transcript_text: 
     """Generate a second-pass task suggestion block for the meeting note."""
     task_context = load_daily_task_context(meeting_date)
     pending_tasks = task_context["pending_tasks"]
-    daily_tasks_block = "\n".join(pending_tasks) if pending_tasks else "(nenhuma task programada encontrada para esta data)"
-    transcript_excerpt = truncate_text(transcript_text, max_chars=10000, head_chars=8000, tail_chars=1500)
+    transcript_excerpt = truncate_text(
+        transcript_text,
+        max_chars=TASK_SUGGESTIONS_TRANSCRIPT_MAX_CHARS,
+        head_chars=8000,
+        tail_chars=1500,
+    )
 
     messages = [
         {"role": "system", "content": TASK_SUGGESTIONS_SYSTEM_PROMPT},
@@ -225,7 +230,6 @@ def generate_task_suggestions(meeting_date: str, summary: str, transcript_text: 
             "role": "user",
             "content": TASK_SUGGESTIONS_USER_PROMPT.format(
                 meeting_date=meeting_date,
-                daily_tasks=daily_tasks_block,
                 summary=summary,
                 transcript_excerpt=transcript_excerpt,
             ),
