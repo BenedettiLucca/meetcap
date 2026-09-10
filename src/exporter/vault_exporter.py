@@ -1,4 +1,5 @@
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -144,6 +145,20 @@ def export_note(txt_path: Path, custom_title: str | None = None) -> dict[str, An
     filename = f"{safe_name}.md"
     out_path = MEETINGS_DIR / filename
 
+    # #12 no-clobber: if note already exists, find first free collision suffix (-a, -b, …).
+    if out_path.exists():
+        for suffix_char in "abcdefghijklmnopqrstuvwxyz":
+            candidate_name = f"{safe_name}-{suffix_char}"
+            candidate_path = MEETINGS_DIR / f"{candidate_name}.md"
+            if not candidate_path.exists():
+                safe_name = candidate_name
+                filename = f"{safe_name}.md"
+                out_path = candidate_path
+                break
+        else:
+            # Extremely unlikely: all 26 suffixes taken.
+            return {"success": False, "error": "No free collision suffix available for note"}
+
     verification: dict[str, Any] = {
         "coverage_score": None, "needs_human_review": False, "error": None,
         "decision_gaps": [], "action_item_gaps": [],
@@ -205,10 +220,14 @@ def export_note(txt_path: Path, custom_title: str | None = None) -> dict[str, An
         manifest_block=manifest_block,
     )
 
-    out_path.write_text(content, encoding="utf-8")
+    # #17 atomic write: write to .partial then os.replace to prevent truncated notes.
+    partial_path = out_path.with_suffix(".partial")
+    partial_path.write_text(content, encoding="utf-8")
+    partial_path.replace(out_path)
     print(f"[EXPORT] Saved to {out_path}")
 
     artifacts: list[str] = []
+    artifacts_failed = False
     artifact_dir = ARTIFACTS_DIR / safe_name
     try:
         artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -261,10 +280,13 @@ def export_note(txt_path: Path, custom_title: str | None = None) -> dict[str, An
             )
             artifacts.append(str(manifest_path))
     except OSError as exc:
+        artifacts_failed = True
         print(f"[EXPORT] Artifact write failed: {exc}")
+        # Prune artifacts list to only what actually exists on disk.
+        artifacts = [a for a in artifacts if Path(a).exists()]
 
     return {
-        "success": True,
+        "success": not artifacts_failed,
         "path": str(out_path),
         "filename": filename,
         "transcript_lines": data["line_count"],
