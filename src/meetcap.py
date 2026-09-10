@@ -298,7 +298,9 @@ def transcribe(wav_path):
 
             transcript = "\n".join(lines)
             txt_path = wav_path.with_suffix(".txt")
-            txt_path.write_text(transcript)
+            tmp_path = wav_path.with_suffix(".tmp")
+            tmp_path.write_text(transcript)
+            os.replace(tmp_path, txt_path)
             print(f"[DONE] {txt_path}")
             return str(txt_path)
         finally:
@@ -335,6 +337,26 @@ def transcribe(wav_path):
     raise last_error
 
 
+def _is_transcript_complete(txt_path: Path) -> bool:
+    """Check whether a .txt transcript exists and is complete (#37).
+
+    A transcript is considered incomplete (resumable) if it does not exist,
+    is 0 bytes, or does not contain the '---' header separator.
+    """
+    try:
+        if not txt_path.is_file():
+            return False
+        if txt_path.stat().st_size == 0:
+            return False
+        content = txt_path.read_text(encoding="utf-8", errors="replace")
+        for line in content.splitlines():
+            if line.strip() == "---":
+                return True
+        return False
+    except OSError:
+        return False
+
+
 def do_transcribe_last():
     """Transcribe the most recent WAV. Called in background thread."""
     with state_lock:
@@ -343,10 +365,10 @@ def do_transcribe_last():
         wavs = sorted(RECORDINGS_DIR.glob("*.wav"), key=lambda p: p.stat().st_mtime, reverse=True)
         if not wavs:
             return {"ok": False, "error": "No recordings found"}
-        # Skip if .txt already exists
+        # Skip if .txt already exists and is complete (#37)
         wav = None
         for w in wavs:
-            if not w.with_suffix(".txt").exists():
+            if not _is_transcript_complete(w.with_suffix(".txt")):
                 wav = w
                 break
         if not wav:
@@ -355,24 +377,22 @@ def do_transcribe_last():
         state.last_error = None
         save_state()
 
-    notify("Meetcap", "📝 Transcribing...", wav.name)
-
     try:
+        notify("Meetcap", "📝 Transcribing...", wav.name)
         txt = transcribe(wav)
         notify("Meetcap", "✅ Transcript done", os.path.basename(txt))
         # Auto-export to Obsidian vault with AI summary
         threading.Thread(target=auto_export, args=(txt,), daemon=True).start()
-        with state_lock:
-            state.is_transcribing = False
-            save_state()
         return {"ok": True, "file": txt}
     except Exception as e:
         with state_lock:
-            state.is_transcribing = False
             state.last_error = str(e)
-            save_state()
         notify("Meetcap", "❌ Transcription failed", str(e))
         return {"ok": False, "error": str(e)}
+    finally:
+        with state_lock:
+            state.is_transcribing = False
+            save_state()
 
 
 def auto_export(txt_path: str):
@@ -404,21 +424,38 @@ def _reset_transcribing_on_fail():
     notify("Meetcap", "❌ Transcription failed", "Check logs for details")
     print("[WATCHDOG] Cleared stuck transcribing state")
 
-def transcribe_cmd():
+def _transcription_watchdog(t: threading.Thread, timeout: float = 3600.0) -> None:
+    """Watchdog for transcription thread (#15).
+
+    Waits up to `timeout` seconds for the transcription thread to complete.
+    If the thread is still alive after the timeout, leaves state intact.
+    If the thread died without resetting `is_transcribing`, cleans up stuck state.
+    """
+    t.join(timeout=timeout)
+    if t.is_alive():
+        print(f"[WATCHDOG] Transcription thread still alive after timeout ({timeout}s); leaving state intact")
+        return
+
+    with state_lock:
+        if state.is_transcribing:
+            state.is_transcribing = False
+            save_state()
+            notify("Meetcap", "⚠️ Transcription watchdog triggered", "Thread finished but state was stuck")
+            print("[WATCHDOG] Cleared stuck transcribing state (thread finished)")
+
+
+def transcribe_cmd(watchdog_timeout: float = 3600.0):
     """Handle transcribe command — runs in background."""
     if state.is_recording:
         return {"ok": False, "error": "Stop recording first"}
     t = threading.Thread(target=do_transcribe_last, daemon=True)
     t.start()
     # Start watchdog: if thread dies without resetting is_transcribing, clear it
-    def watchdog():
-        t.join(timeout=3600)
-        with state_lock:
-            if state.is_transcribing:
-                state.is_transcribing = False
-                save_state()
-                notify("Meetcap", "⚠️ Transcription watchdog triggered", "Thread finished but state was stuck")
-    threading.Thread(target=watchdog, daemon=True).start()
+    threading.Thread(
+        target=_transcription_watchdog,
+        args=(t, watchdog_timeout),
+        daemon=True,
+    ).start()
     return {"ok": True, "status": "transcription started"}
 
 
