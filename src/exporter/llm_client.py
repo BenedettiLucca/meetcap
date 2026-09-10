@@ -6,6 +6,14 @@ import httpx
 
 from .config import OPENROUTER_URL, OPENROUTER_KEY, LLM_MODEL
 
+try:
+    from process_env import load_env_keys
+except ImportError:
+    try:
+        from ..process_env import load_env_keys
+    except ImportError:
+        from src.process_env import load_env_keys
+
 REQUEST_TIMEOUT = httpx.Timeout(300.0, connect=10.0)
 
 
@@ -26,16 +34,18 @@ class LLMResponseError(LLMError):
 
 
 def load_openrouter_key() -> str:
-    """Load OpenRouter API key from Hermes .env if not in env."""
+    """Load OpenRouter API key from config/env or fallback env files with minimal privilege."""
     if OPENROUTER_KEY:
         return OPENROUTER_KEY
 
-    env_file = Path.home() / ".hermes" / ".env"
-    if env_file.exists():
-        for line in env_file.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line.startswith("OPENROUTER_API_KEY=") and not line.startswith("#"):
-                return line.split("=", 1)[1].strip()
+    for candidate in (
+        Path.home() / ".config" / "meetcap" / "env",
+        Path.home() / ".hermes" / ".env",
+    ):
+        keys = load_env_keys(candidate, allowed={"OPENROUTER_API_KEY"})
+        val = keys.get("OPENROUTER_API_KEY", "").strip()
+        if val:
+            return val
     return ""
 
 
