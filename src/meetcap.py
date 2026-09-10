@@ -46,6 +46,7 @@ class State:
     is_recording = False
     is_transcribing = False
     last_error = None
+    recording_since = None  # ISO-8601 BRT timestamp when recording started (#42)
 
 state = State()
 state_lock = threading.Lock()
@@ -58,6 +59,7 @@ def save_state():
         "transcribing": state.is_transcribing,
         "last_file": str(state.recording_file) if state.recording_file else None,
         "error": state.last_error,
+        "recording_since": state.recording_since,
     }
     runtime_paths.ensure_runtime_dir(STATE_FILE.parent)
     STATE_FILE.write_text(json.dumps(data))
@@ -78,8 +80,60 @@ def get_audio_sources():
 
 
 # ── Recording ────────────────────────────────────────────────────────
+def _unique_wav_path(recordings_dir: Path, ts: str) -> Path:
+    """Return a WAV path that does not yet exist.
+
+    If ``meeting-<ts>.wav`` already exists, append ``-1``, ``-2``, ... until
+    a free slot is found.  Never returns a path that points to an existing file,
+    so ffmpeg is never passed ``-y`` against an existing recording (#33).
+    """
+    candidate = recordings_dir / f"meeting-{ts}.wav"
+    if not candidate.exists():
+        return candidate
+    n = 1
+    while True:
+        candidate = recordings_dir / f"meeting-{ts}-{n}.wav"
+        if not candidate.exists():
+            return candidate
+        n += 1
+
+
+def _recording_watcher(proc, wav_path, stop_event: threading.Event):
+    """Background thread: poll ffmpeg every 2 s, act if it dies unexpectedly (#11)."""
+    while not stop_event.wait(2.0):
+        rc = proc.poll()
+        if rc is None:
+            continue  # still running
+
+        # Process died.  Check whether stop_recording already cleaned up.
+        with state_lock:
+            if state.recording_proc is not proc:
+                # stop_recording already handled it — nothing to do.
+                return
+            # Unexpected death: clean state.
+            state.is_recording = False
+            state.recording_proc = None
+            state.recording_since = None
+            msg = f"ffmpeg died unexpectedly (rc={rc}); file may be truncated: {wav_path.name}"
+            state.last_error = msg
+            save_state()
+
+        notify("Meetcap", "❌ Recording interrupted", msg[:180])
+        print(f"[WATCHER] {msg}")
+        return
+
+
 def start_recording():
     with state_lock:
+        # #11: if there's a lingering proc that already died, clean state before checking.
+        if state.recording_proc is not None and state.recording_proc.poll() is not None:
+            state.recording_proc = None
+            state.is_recording = False
+            state.recording_since = None
+            if not state.last_error:
+                state.last_error = "Previous ffmpeg process died unexpectedly"
+            save_state()
+
         if state.is_recording:
             return {"ok": False, "error": "Already recording"}
 
@@ -88,13 +142,16 @@ def start_recording():
             return {"ok": False, "error": "No audio sources detected"}
 
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        wav_file = RECORDINGS_DIR / f"meeting-{ts}.wav"
+        wav_file = _unique_wav_path(RECORDINGS_DIR, ts)  # #33: collision-safe
         log_file = wav_file.with_suffix(".ffmpeg.log")
         state.recording_file = wav_file
         state.recording_log = log_file
 
+        # #33: never pass -y against a file that already exists.
+        # _unique_wav_path guarantees wav_file doesn't exist, but we keep -y removed
+        # to ensure we never silently overwrite; ffmpeg will error instead of clobbering.
         cmd = [
-            "ffmpeg", "-y",
+            "ffmpeg",
             "-f", "pulse", "-i", mic_src,
             "-f", "pulse", "-i", sys_src,
             "-filter_complex",
@@ -124,13 +181,26 @@ def start_recording():
                 state.last_error += f": {error_tail}"
             state.recording_proc = None
             state.is_recording = False
+            state.recording_since = None
             save_state()
             notify("Meetcap", "❌ Recording failed", state.last_error[:180])
             return {"ok": False, "error": state.last_error, "log": str(log_file)}
 
+        # #42: stamp when recording truly started (BRT = UTC-3, fixed offset).
+        now_brt = datetime.now().astimezone()
+        state.recording_since = now_brt.isoformat()
         state.is_recording = True
         state.last_error = None
         save_state()
+
+        # #11: spawn watcher thread to detect unexpected ffmpeg death.
+        _stop_watcher = threading.Event()
+        state._stop_watcher = _stop_watcher  # keep ref so stop_recording can signal it
+        threading.Thread(
+            target=_recording_watcher,
+            args=(state.recording_proc, wav_file, _stop_watcher),
+            daemon=True,
+        ).start()
 
     # Send desktop notification
     notify("Meetcap", "🎙 Recording started", f"mic={mic_src}\nsys={sys_src}")
@@ -138,10 +208,31 @@ def start_recording():
     return {"ok": True, "file": str(wav_file)}
 
 
+
 def stop_recording():
     with state_lock:
+        # #11: if proc exists but is already dead (watcher may not have fired yet),
+        # refuse to pretend we stopped it cleanly.
+        if state.recording_proc is not None and state.recording_proc.poll() is not None:
+            # Ghost process — watcher will/has cleaned state.  Return informative error.
+            proc_rc = state.recording_proc.returncode
+            state.recording_proc = None
+            state.is_recording = False
+            state.recording_since = None
+            state.last_error = (
+                f"Recording process had already died (rc={proc_rc}); "
+                f"file may be truncated: {state.recording_file}"
+            )
+            save_state()
+            return {"ok": False, "error": state.last_error}
+
         if not state.is_recording or not state.recording_proc:
             return {"ok": False, "error": "Not recording"}
+
+        # Signal watcher to stop before we nullify recording_proc.
+        stop_ev = getattr(state, "_stop_watcher", None)
+        if stop_ev is not None:
+            stop_ev.set()
 
         try:
             state.recording_proc.communicate(input=b"q", timeout=5)
@@ -152,6 +243,7 @@ def stop_recording():
         wav = state.recording_file
         state.is_recording = False
         state.recording_proc = None
+        state.recording_since = None  # #42: clear since on stop
         if not wav or not wav.exists() or wav.stat().st_size <= 44:
             state.last_error = f"Recording stopped but WAV was not created or is empty: {wav}"
             save_state()
@@ -163,6 +255,7 @@ def stop_recording():
     notify("Meetcap", f"⏹ Recording saved", str(wav.name) if wav else "")
     print(f"[STOPPED] {wav}")
     return {"ok": True, "file": str(wav)}
+
 
 
 # ── Transcription ────────────────────────────────────────────────────
@@ -351,6 +444,7 @@ def handle_command(cmd):
             "transcribing": state.is_transcribing,
             "last_file": str(state.recording_file) if state.recording_file else None,
             "error": state.last_error,
+            "recording_since": state.recording_since,  # #42: ISO-8601 BRT or None
         }
     elif cmd == "record":
         return start_recording()

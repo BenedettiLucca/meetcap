@@ -46,6 +46,7 @@ class RecordingCommandTests(unittest.TestCase):
         meetcap.state.is_recording = False
         meetcap.state.recording_proc = None
         meetcap.state.recording_file = None
+        meetcap.state.recording_since = None
 
     def test_record_without_audio_sources_fails(self):
         with patch("meetcap.get_audio_sources", return_value=(None, None)):
@@ -85,6 +86,7 @@ class RecordingCommandTests(unittest.TestCase):
 class StatusCommandTests(unittest.TestCase):
     def test_status_reports_state_fields(self):
         meetcap.state.recording_file = Path("/tmp/fake.wav")
+        meetcap.state.recording_since = None
         status = meetcap.handle_command("status")
         self.assertEqual(
             status,
@@ -93,6 +95,7 @@ class StatusCommandTests(unittest.TestCase):
                 "transcribing": meetcap.state.is_transcribing,
                 "last_file": "/tmp/fake.wav",
                 "error": meetcap.state.last_error,
+                "recording_since": None,
             },
         )
 
