@@ -20,14 +20,19 @@ from datetime import datetime
 from pathlib import Path
 
 import doctor
+import runtime_paths
+from runtime_paths import pid_is_meetcap
 
 # ── Config ──────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent.parent
 RECORDINGS_DIR = BASE_DIR / "recordings"
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
-SOCKET_PATH = Path("/tmp/meetcap.sock")
-PID_FILE = Path("/tmp/meetcap.pid")
-STATE_FILE = Path("/tmp/meetcap_state.json")
+SOCKET_PATH = runtime_paths.socket_path()
+PID_FILE = runtime_paths.pid_path()
+STATE_FILE = runtime_paths.state_path()
+LOG_PATH = runtime_paths.log_path()
+
+SOCKET_TIMEOUT = float(os.environ.get("MEETCAP_SOCKET_TIMEOUT", "2.0"))
 
 WHISPER_MODEL = os.environ.get("MEETCAP_MODEL", "large-v3-turbo")
 WHISPER_DEVICE = os.environ.get("MEETCAP_DEVICE", "cuda")
@@ -54,6 +59,7 @@ def save_state():
         "last_file": str(state.recording_file) if state.recording_file else None,
         "error": state.last_error,
     }
+    runtime_paths.ensure_runtime_dir(STATE_FILE.parent)
     STATE_FILE.write_text(json.dumps(data))
 
 
@@ -367,6 +373,7 @@ def handle_command(cmd):
 def client_handler(conn):
     """Handle a single client connection."""
     try:
+        conn.settimeout(SOCKET_TIMEOUT)
         data = conn.recv(4096).decode().strip()
         if data:
             response = handle_command(data)
@@ -380,11 +387,44 @@ def client_handler(conn):
         conn.close()
 
 
+def acquire_single_instance(sock_path=None, timeout=1.0) -> bool:
+    """Ensure no live meetcap daemon is running before taking over sock_path.
+
+    Returns True if instance can proceed (no socket or orphan socket unlinked).
+    Returns False if a live daemon responded on the socket (do not unlink).
+    """
+    if sock_path is None:
+        sock_path = SOCKET_PATH
+    path = Path(sock_path)
+    if not path.exists():
+        return True
+
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect(str(path))
+        s.sendall(b"status\n")
+        reply = s.recv(1024)
+        if reply:
+            return False
+    except OSError:
+        pass
+    finally:
+        s.close()
+
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    return True
+
+
 def run_server():
     """UNIX socket server main loop."""
-    # Clean stale socket
-    if SOCKET_PATH.exists():
-        SOCKET_PATH.unlink()
+    runtime_paths.ensure_runtime_dir(SOCKET_PATH.parent)
+    if not acquire_single_instance(SOCKET_PATH):
+        print(f"[DAEMON] Another meetcap daemon is already running on {SOCKET_PATH}", file=sys.stderr)
+        sys.exit(1)
 
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(str(SOCKET_PATH))
@@ -403,6 +443,7 @@ def run_server():
     signal.signal(signal.SIGINT, shutdown)
 
     # Write PID file
+    runtime_paths.ensure_runtime_dir(PID_FILE.parent)
     PID_FILE.write_text(str(os.getpid()))
 
     while running:
@@ -427,25 +468,44 @@ def run_server():
 
 
 # ── CLI ──────────────────────────────────────────────────────────────
-def _send(cmd):
+def _resolve_socket():
+    # ponytail: no /tmp glob fallback — cross-user socket discovery defeats #18 isolation
+    return SOCKET_PATH
+
+
+def _send(cmd, timeout=SOCKET_TIMEOUT, sock_path=None):
     """Send a command to the daemon and return the raw response, or None."""
+    s = None
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.connect(str(SOCKET_PATH))
+        s.settimeout(timeout)
+        target = sock_path or _resolve_socket()
+        s.connect(str(target))
         s.sendall((cmd + "\n").encode())
         data = s.recv(4096).decode().strip()
-        s.close()
         return data
+    except (socket.timeout, TimeoutError):
+        raise TimeoutError("Timed out waiting for daemon response")
     except OSError:
         return None
+    finally:
+        if s is not None:
+            try:
+                s.close()
+            except OSError:
+                pass
 
 
-def send_command(cmd):
+def send_command(cmd, sock_path=None):
     """Send a command to the daemon and return the response."""
-    if not SOCKET_PATH.exists():
+    target = sock_path or _resolve_socket()
+    if not target.exists():
         print("Meetcap daemon is not running", file=sys.stderr)
         sys.exit(1)
-    data = _send(cmd)
+    try:
+        data = _send(cmd, sock_path=target)
+    except TimeoutError:
+        raise
     if data is None:
         print("Error communicating with daemon", file=sys.stderr)
         sys.exit(1)
@@ -480,7 +540,10 @@ def status_cmd():
         diagnosis = doctor.diagnose(SOCKET_PATH, PID_FILE)
         print(doctor.format_report(diagnosis))
         sys.exit(1)
-    daemon_status = _send("status")
+    try:
+        daemon_status = _send("status")
+    except TimeoutError:
+        daemon_status = None
     svc = doctor.check_service()
     pid = doctor.read_pid(PID_FILE)
     print(f"Daemon: running (pid {pid})")
@@ -492,7 +555,8 @@ def status_cmd():
 
 def _spawn_manual_daemon():
     doctor.clean_stale_files(SOCKET_PATH, PID_FILE)
-    log_path = Path("/tmp/meetcap-daemon.log")
+    log_path = LOG_PATH
+    runtime_paths.ensure_runtime_dir(log_path.parent)
     with log_path.open("ab") as log:
         subprocess.Popen(
             [sys.executable, str(Path(__file__).resolve()), "daemon"],
@@ -522,6 +586,18 @@ def start_cmd():
         sys.exit(1)
 
 
+def stop_daemon():
+    """Stop running meetcap daemon safely (guarding PID reuse)."""
+    pid = doctor.read_pid(PID_FILE)
+    if pid and not pid_is_meetcap(pid):
+        print(f"[STOP] Stale PID {pid} is not meetcap, cleaning up without killing")
+        doctor.clean_stale_files(SOCKET_PATH, PID_FILE)
+        return True
+    stopped = doctor.stop_pid(pid)
+    doctor.clean_stale_files(SOCKET_PATH, PID_FILE)
+    return stopped
+
+
 def restart_cmd():
     svc = doctor.check_service()
     if svc["installed"]:
@@ -532,8 +608,12 @@ def restart_cmd():
             sys.exit(1)
     else:
         pid = doctor.read_pid(PID_FILE)
-        if doctor.stop_pid(pid):
-            print("[RESTART] Stopped old daemon")
+        if pid and not pid_is_meetcap(pid):
+            print(f"[RESTART] Stale PID {pid} is not meetcap, cleaning up")
+            doctor.clean_stale_files(None, PID_FILE)
+        else:
+            if doctor.stop_pid(pid):
+                print("[RESTART] Stopped old daemon")
         doctor.clean_stale_files(SOCKET_PATH, PID_FILE)
         _spawn_manual_daemon()
     if wait_for_socket():
@@ -574,12 +654,18 @@ def main():
         start_cmd()
     elif cmd == "restart":
         restart_cmd()
+    elif cmd == "stop-daemon":
+        stop_daemon()
     elif cmd == "install-service":
         install_service_cmd()
     else:
         # Client mode — send command to daemon
-        response = send_command(cmd)
-        print(response)
+        try:
+            response = send_command(cmd)
+            print(response)
+        except TimeoutError as e:
+            print(f"Error communicating with daemon: {e}", file=sys.stderr)
+            sys.exit(1)
 
 
 if __name__ == "__main__":

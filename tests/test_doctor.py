@@ -469,5 +469,46 @@ class BootstrapCliTests(unittest.TestCase):
         self.assertTrue(popen.call_args.kwargs.get("start_new_session"))
 
 
+class DoctorDefaultsAndStopDaemonTests(unittest.TestCase):
+    def test_clean_stale_files_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sock = Path(tmp) / "meetcap.sock"
+            pid = Path(tmp) / "meetcap.pid"
+            sock.touch()
+            pid.touch()
+            with patch.object(doctor, "SOCKET_PATH", sock), \
+                 patch.object(doctor, "PID_FILE", pid):
+                removed = doctor.clean_stale_files()
+                self.assertFalse(sock.exists())
+                self.assertFalse(pid.exists())
+                self.assertEqual(len(removed), 2)
+
+    def test_stop_daemon_stale_pid_cleans_without_killing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sock = Path(tmp) / "meetcap.sock"
+            pid_file = Path(tmp) / "meetcap.pid"
+            sock.touch()
+            pid_file.write_text("12345\n")
+            with patch("doctor.pid_is_meetcap", return_value=False), \
+                 patch("doctor.stop_pid") as mock_stop:
+                self.assertTrue(doctor.stop_daemon(sock, pid_file))
+                mock_stop.assert_not_called()
+                self.assertFalse(sock.exists())
+                self.assertFalse(pid_file.exists())
+
+    def test_stop_daemon_meetcap_pid_kills(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sock = Path(tmp) / "meetcap.sock"
+            pid_file = Path(tmp) / "meetcap.pid"
+            sock.touch()
+            pid_file.write_text("12345\n")
+            with patch("doctor.pid_is_meetcap", return_value=True), \
+                 patch("doctor.stop_pid", return_value=True) as mock_stop:
+                self.assertTrue(doctor.stop_daemon(sock, pid_file))
+                mock_stop.assert_called_once_with(12345)
+                self.assertFalse(sock.exists())
+                self.assertFalse(pid_file.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -109,9 +109,12 @@ class SocketTimeoutContractTests(unittest.TestCase):
                 error[0] = exc
             called.set()
 
-        thread = threading.Thread(target=call_send)
-        thread.start()
-        finished = thread.join(timeout=5) is None
+        # Point send_command at the hung listener explicitly (contract fix: the
+        # removed /tmp glob discovery was a cross-user isolation hole, issue #18).
+        with patch.object(meetcap, "SOCKET_PATH", sock_path):
+            thread = threading.Thread(target=call_send)
+            thread.start()
+            finished = thread.join(timeout=5) is None
 
         self.assertTrue(
             called.wait(timeout=6),

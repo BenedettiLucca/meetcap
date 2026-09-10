@@ -3,8 +3,15 @@
 # Usage: bind to a key in Hyprland
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SOCKET="/tmp/meetcap.sock"
-STATE="/tmp/meetcap_state.json"
+if [ -n "$MEETCAP_RUNTIME_DIR" ]; then
+    RUNTIME_DIR="$MEETCAP_RUNTIME_DIR"
+elif [ -n "$XDG_RUNTIME_DIR" ]; then
+    RUNTIME_DIR="$XDG_RUNTIME_DIR/meetcap"
+else
+    RUNTIME_DIR="/run/user/$(id -u)/meetcap"
+fi
+SOCKET="$RUNTIME_DIR/meetcap.sock"
+STATE="$RUNTIME_DIR/meetcap_state.json"
 
 daemon_ok() {
     [ -S "$SOCKET" ] && [ -n "$(echo 'status' | socat -t 2 - UNIX-CONNECT:"$SOCKET" 2>/dev/null)" ]
