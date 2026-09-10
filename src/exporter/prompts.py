@@ -89,24 +89,21 @@ Chunk summaries:
 {chunk_summaries}
 """
 
-TASK_SUGGESTIONS_SYSTEM_PROMPT = """You compare a meeting against the user's current daily task list and suggest tasks for manual review.
+TASK_SUGGESTIONS_SYSTEM_PROMPT = """You suggest actionable tasks derived from a meeting for manual review.
 
 Important:
 - This is a manual-review workflow, not an auto-planning workflow.
 - Suggest only tasks that the user can copy and paste into "Tasks do Dia".
 - Be conservative: false negatives are better than false positives.
-- If a task is already clearly present in the daily task list, put it in matched_tasks instead of new_suggested_tasks.
-- Only use matched_tasks when the meeting mentions the SAME deliverable or clearly the same follow-up. Shared theme is not enough.
-- Do not match generic mentions of ads, design, content, or community to client-specific tasks unless the same client/project is explicit.
-- If something is vague, belongs to someone else, or is just context, put it in not_now_items or omit it.
-- Use the same language as the meeting/task list.
+- If something is vague, belongs to someone else, is not an immediate action, or is just context, put it in not_now_items or omit it.
+- Use the same language as the meeting.
 - Keep task wording short, concrete, and actionable.
 - No duplicates.
 - Return json only.
 
 Return valid json with exactly this shape:
 {
-  "matched_tasks": ["- [ ] Existing task"],
+  "matched_tasks": [],
   "new_suggested_tasks": ["- [ ] New copy-paste-ready task"],
   "not_now_items": [
     {"item": "Short item", "reason": "Short reason"}
@@ -119,16 +116,13 @@ TASK_SUGGESTIONS_USER_PROMPT = """Generate json only.
 
 Meeting date: {meeting_date}
 
-Current daily tasks:
-{daily_tasks}
-
 Meeting summary:
 {summary}
 
 Transcript excerpt:
 {transcript_excerpt}
 
-Task again: compare the meeting against the current daily tasks and produce copy-paste-ready task suggestions in json only."""
+Task again: suggest copy-paste-ready tasks derived from the meeting in json only."""
 
 JSON_REPAIR_SYSTEM_PROMPT = """You repair malformed json.
 
@@ -137,7 +131,7 @@ Do not add commentary.
 Preserve the original meaning and keys when possible.
 Target schema:
 {
-  "matched_tasks": ["- [ ] Existing task"],
+  "matched_tasks": [],
   "new_suggested_tasks": ["- [ ] New copy-paste-ready task"],
   "not_now_items": [
     {"item": "Short item", "reason": "Short reason"}
