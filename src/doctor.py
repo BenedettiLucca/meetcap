@@ -15,6 +15,14 @@ import subprocess
 import time
 from pathlib import Path
 
+import runtime_paths
+from runtime_paths import pid_is_meetcap
+
+SOCKET_PATH = runtime_paths.socket_path()
+PID_FILE = runtime_paths.pid_path()
+STATE_FILE = runtime_paths.state_path()
+LOG_PATH = runtime_paths.log_path()
+
 SERVICE_NAME = "meetcap"
 REQUIRED_BINARIES = ("ffmpeg", "pactl", "socat", "rofi")
 
@@ -39,8 +47,10 @@ _MESSAGES = {
 
 
 # ── Individual checks ────────────────────────────────────────────────
-def ping_socket(socket_path, timeout=1.0):
+def ping_socket(socket_path=None, timeout=1.0):
     """Return True if the daemon socket accepts connections and answers."""
+    if socket_path is None:
+        socket_path = SOCKET_PATH
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
@@ -53,8 +63,10 @@ def ping_socket(socket_path, timeout=1.0):
         s.close()
 
 
-def read_pid(pid_file):
+def read_pid(pid_file=None):
     """Return the PID recorded in pid_file, or None if unreadable."""
+    if pid_file is None:
+        pid_file = PID_FILE
     try:
         return int(Path(pid_file).read_text().strip())
     except (OSError, ValueError):
@@ -179,9 +191,14 @@ def _action(status, svc):
     return ""
 
 
-def diagnose(socket_path, pid_file, *, binaries=REQUIRED_BINARIES,
+def diagnose(socket_path=None, pid_file=None, *, binaries=REQUIRED_BINARIES,
              service=SERVICE_NAME, sources=None):
     """Run all checks and return a diagnosis dict with a recovery action."""
+    if socket_path is None:
+        socket_path = SOCKET_PATH
+    if pid_file is None:
+        pid_file = PID_FILE
+
     socket_exists = Path(socket_path).exists()
     socket_ok = ping_socket(socket_path) if socket_exists else False
     pid = read_pid(pid_file)
@@ -239,16 +256,36 @@ def format_report(diagnosis):
 
 
 # ── Recovery helpers ─────────────────────────────────────────────────
-def clean_stale_files(socket_path, pid_file):
+def clean_stale_files(socket_path=None, pid_file=None):
     """Remove stale socket/PID files. Safe to call when the daemon is down."""
+    if socket_path is None and pid_file is None:
+        socket_path = SOCKET_PATH
+        pid_file = PID_FILE
     removed = []
     for p in (socket_path, pid_file):
+        if p is None:
+            continue
         try:
             Path(p).unlink()
             removed.append(str(p))
         except OSError:
             pass
     return removed
+
+
+def stop_daemon(socket_path=None, pid_file=None):
+    """Safely stop daemon guarding against PID reuse."""
+    if socket_path is None:
+        socket_path = SOCKET_PATH
+    if pid_file is None:
+        pid_file = PID_FILE
+    pid = read_pid(pid_file)
+    if pid and not pid_is_meetcap(pid):
+        clean_stale_files(socket_path, pid_file)
+        return True
+    stopped = stop_pid(pid)
+    clean_stale_files(socket_path, pid_file)
+    return stopped
 
 
 def stop_pid(pid, timeout=5.0):
