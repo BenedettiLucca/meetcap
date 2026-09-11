@@ -1,0 +1,30 @@
+// waybar-meetcap.jsonc
+// Bloco de configuração mínima para o indicador de gravação do Meetcap no Waybar.
+// Inclua este bloco na seção "modules-right" (ou onde preferir) do seu config.json.
+//
+// Exemplo de uso:
+//   "modules-right": ["custom/meetcap", ...]
+//
+// Pré-requisito: waybar-meetcap.py no PATH ou com caminho absoluto em "exec".
+
+{
+    "custom/meetcap": {
+        // Caminho para o script; ajuste se não estiver no PATH.
+        // Use o caminho absoluto se preferir:
+        //   "exec": "/home/USUARIO/bin/waybar-meetcap.py --once"
+        "exec": "waybar-meetcap.py --once",
+
+        // Intervalo de atualização em segundos. O script usa --once para
+        // que o Waybar controle o ciclo; use 5 para atualização a cada 5s.
+        "interval": 5,
+
+        // Waybar interpreta a saída como JSON (text / tooltip / class).
+        "return-type": "json",
+
+        // Classes CSS disponíveis: "recording" (gravando) e "inactive" (parado).
+        // Adicione ao seu style.css:
+        //   #custom-meetcap.recording { color: #ff5555; }
+        //   #custom-meetcap.inactive  { color: #888888; }
+        "tooltip": true
+    }
+}

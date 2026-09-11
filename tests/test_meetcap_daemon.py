@@ -2,6 +2,8 @@ import json
 import socket
 import subprocess
 import sys
+import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -44,6 +46,7 @@ class RecordingCommandTests(unittest.TestCase):
         meetcap.state.is_recording = False
         meetcap.state.recording_proc = None
         meetcap.state.recording_file = None
+        meetcap.state.recording_since = None
 
     def test_record_without_audio_sources_fails(self):
         with patch("meetcap.get_audio_sources", return_value=(None, None)):
@@ -74,6 +77,18 @@ class RecordingCommandTests(unittest.TestCase):
         mock_stop.assert_called_once()
         self.assertTrue(result["ok"])
 
+    def test_transcribe_while_recording_fails(self):
+        meetcap.state.is_recording = True
+        result = meetcap.handle_command("transcribe")
+        self.assertFalse(result["ok"])
+        self.assertIn("Stop recording first", result["error"])
+
+    def test_transcribe_dispatches_when_idle(self):
+        with patch("meetcap.transcribe_cmd", return_value={"ok": True, "status": "started"}) as mock_cmd:
+            result = meetcap.handle_command("transcribe")
+        mock_cmd.assert_called_once()
+        self.assertTrue(result["ok"])
+
     def test_unknown_command_returns_error(self):
         result = meetcap.handle_command("bogus")
         self.assertFalse(result["ok"])
@@ -83,6 +98,7 @@ class RecordingCommandTests(unittest.TestCase):
 class StatusCommandTests(unittest.TestCase):
     def test_status_reports_state_fields(self):
         meetcap.state.recording_file = Path("/tmp/fake.wav")
+        meetcap.state.recording_since = None
         status = meetcap.handle_command("status")
         self.assertEqual(
             status,
@@ -91,6 +107,7 @@ class StatusCommandTests(unittest.TestCase):
                 "transcribing": meetcap.state.is_transcribing,
                 "last_file": "/tmp/fake.wav",
                 "error": meetcap.state.last_error,
+                "recording_since": None,
             },
         )
 
@@ -168,6 +185,112 @@ class AutoExportTests(unittest.TestCase):
                 side_effect=subprocess.TimeoutExpired(cmd="python", timeout=600),
             ):
                 meetcap.auto_export("/tmp/does-not-matter.txt")
+
+
+class SingleInstanceTests(unittest.TestCase):
+    def test_acquire_single_instance_no_socket(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sock = Path(tmp) / "test.sock"
+            self.assertTrue(meetcap.acquire_single_instance(sock))
+
+    def test_acquire_single_instance_orphan_socket_unlinked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sock = Path(tmp) / "test.sock"
+            sock.touch()
+            self.assertTrue(sock.exists())
+            self.assertTrue(meetcap.acquire_single_instance(sock))
+            self.assertFalse(sock.exists())
+
+    def test_acquire_single_instance_live_socket_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sock = Path(tmp) / "test.sock"
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.addCleanup(server.close)
+            server.bind(str(sock))
+            server.listen(1)
+
+            def serve():
+                try:
+                    conn, _ = server.accept()
+                    conn.sendall(b'{"recording": false}\n')
+                    conn.close()
+                except OSError:
+                    pass
+
+            threading.Thread(target=serve, daemon=True).start()
+            self.assertFalse(meetcap.acquire_single_instance(sock))
+            self.assertTrue(sock.exists())
+
+    def test_run_server_exits_when_already_running(self):
+        with patch("meetcap.acquire_single_instance", return_value=False), \
+             patch("meetcap.runtime_paths.ensure_runtime_dir"):
+            with self.assertRaises(SystemExit) as ctx:
+                meetcap.run_server()
+            self.assertEqual(ctx.exception.code, 1)
+
+
+class PidGuardLifecycleTests(unittest.TestCase):
+    def test_restart_stale_pid_cleans_file_without_killing(self):
+        svc = {"installed": False, "enabled": False, "active": False}
+        with patch("meetcap.doctor.check_service", return_value=svc), \
+             patch("meetcap.doctor.read_pid", return_value=9999), \
+             patch("meetcap.pid_is_meetcap", return_value=False), \
+             patch("meetcap.doctor.stop_pid") as mock_stop, \
+             patch("meetcap.doctor.clean_stale_files") as mock_clean, \
+             patch("meetcap._spawn_manual_daemon") as mock_spawn, \
+             patch("meetcap.wait_for_socket", return_value=True), \
+             patch("builtins.print"):
+            meetcap.restart_cmd()
+        mock_stop.assert_not_called()
+        mock_clean.assert_any_call(None, meetcap.PID_FILE)
+        mock_spawn.assert_called_once()
+
+    def test_restart_meetcap_pid_calls_stop_pid(self):
+        svc = {"installed": False, "enabled": False, "active": False}
+        with patch("meetcap.doctor.check_service", return_value=svc), \
+             patch("meetcap.doctor.read_pid", return_value=9999), \
+             patch("meetcap.pid_is_meetcap", return_value=True), \
+             patch("meetcap.doctor.stop_pid", return_value=True) as mock_stop, \
+             patch("meetcap.doctor.clean_stale_files"), \
+             patch("meetcap._spawn_manual_daemon"), \
+             patch("meetcap.wait_for_socket", return_value=True), \
+             patch("builtins.print"):
+            meetcap.restart_cmd()
+        mock_stop.assert_called_once_with(9999)
+
+    def test_stop_daemon_stale_pid_cleans_without_killing(self):
+        with patch("meetcap.doctor.read_pid", return_value=9999), \
+             patch("meetcap.pid_is_meetcap", return_value=False), \
+             patch("meetcap.doctor.stop_pid") as mock_stop, \
+             patch("meetcap.doctor.clean_stale_files") as mock_clean, \
+             patch("builtins.print"):
+            self.assertTrue(meetcap.stop_daemon())
+        mock_stop.assert_not_called()
+        mock_clean.assert_called_once_with(meetcap.SOCKET_PATH, meetcap.PID_FILE)
+
+    def test_stop_daemon_meetcap_pid_calls_stop_pid(self):
+        with patch("meetcap.doctor.read_pid", return_value=9999), \
+             patch("meetcap.pid_is_meetcap", return_value=True), \
+             patch("meetcap.doctor.stop_pid", return_value=True) as mock_stop, \
+             patch("meetcap.doctor.clean_stale_files") as mock_clean:
+            self.assertTrue(meetcap.stop_daemon())
+        mock_stop.assert_called_once_with(9999)
+        mock_clean.assert_called_once_with(meetcap.SOCKET_PATH, meetcap.PID_FILE)
+
+
+class SocketTimeoutTests(unittest.TestCase):
+    def test_client_handler_sets_timeout_on_conn(self):
+        conn = Mock()
+        conn.recv.return_value = b""
+        meetcap.client_handler(conn)
+        conn.settimeout.assert_called_once_with(meetcap.SOCKET_TIMEOUT)
+
+    def test_send_command_timeout_raises_timeout_error(self):
+        with patch("meetcap.SOCKET_PATH") as mock_sock, \
+             patch("meetcap._send", side_effect=TimeoutError("timed out")):
+            mock_sock.exists.return_value = True
+            with self.assertRaises(TimeoutError):
+                meetcap.send_command("status")
 
 
 if __name__ == "__main__":

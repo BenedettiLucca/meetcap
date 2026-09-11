@@ -4,14 +4,25 @@ After=pipewire.service
 
 [Service]
 Type=simple
-Environment=LD_LIBRARY_PATH=/home/lucca/Projects/meetcap/.venv/lib/python3.11/site-packages/nvidia/cublas/lib:/home/lucca/Projects/meetcap/.venv/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib
+# Systemd user service: all paths use the '%h' specifier (user's home directory)
+# so the service is fully portable and works for any user without hardcoded usernames.
+WorkingDirectory=%h/Projects/meetcap
+
+# CUDA runtime libraries in the project virtualenv
+Environment=LD_LIBRARY_PATH=%h/Projects/meetcap/.venv/lib/python3.11/site-packages/nvidia/cublas/lib:%h/Projects/meetcap/.venv/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib
 Environment=MEETCAP_MODEL=large-v3-turbo
 Environment=MEETCAP_DEVICE=cuda
 Environment=MEETCAP_COMPUTE=float16
 Environment=MEETCAP_LLM_MODEL=qwen/qwen3.7-flash
-Environment=OBSIDIAN_VAULT_PATH=/home/lucca/HD2/vault
-EnvironmentFile=/home/lucca/.hermes/.env
-ExecStart=/home/lucca/Projects/meetcap/.venv/bin/python /home/lucca/Projects/meetcap/src/meetcap.py daemon
+# Default Obsidian vault path (can be overridden in the repo .env)
+Environment=OBSIDIAN_VAULT_PATH=%h/HD2/vault
+
+# Repo .env holds minimum-privilege credentials and overrides.
+# Configure secrets there (e.g. OPENROUTER_API_KEY=...); gitignored.
+# The '-' prefix instructs systemd not to fail if the file does not exist.
+EnvironmentFile=-%h/Projects/meetcap/.env
+
+ExecStart=%h/Projects/meetcap/.venv/bin/python %h/Projects/meetcap/src/meetcap.py daemon
 Restart=on-failure
 RestartSec=3
 

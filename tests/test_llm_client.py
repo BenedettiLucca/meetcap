@@ -151,5 +151,48 @@ class RetryDecisionTests(unittest.TestCase):
                 )
 
 
+class LoadOpenRouterKeyTests(unittest.TestCase):
+    def test_env_key_takes_precedence(self):
+        with patch("exporter.llm_client.OPENROUTER_KEY", "synthetic-env-key"), \
+             patch("exporter.llm_client.load_env_keys") as mock_load:
+            key = llm_client.load_openrouter_key()
+            self.assertEqual(key, "synthetic-env-key")
+            mock_load.assert_not_called()
+
+    def test_fallback_uses_load_env_keys_with_strict_allowlist(self):
+        with patch("exporter.llm_client.OPENROUTER_KEY", ""), \
+             patch("exporter.llm_client.load_env_keys", return_value={"OPENROUTER_API_KEY": "synthetic-file-key"}) as mock_load:
+            key = llm_client.load_openrouter_key()
+            self.assertEqual(key, "synthetic-file-key")
+            mock_load.assert_called()
+            # Verify strict allowlist of ONLY OPENROUTER_API_KEY was passed
+            for call_args in mock_load.call_args_list:
+                allowed = call_args.kwargs.get("allowed")
+                if allowed is None and len(call_args.args) > 1:
+                    allowed = call_args.args[1]
+                self.assertEqual(set(allowed), {"OPENROUTER_API_KEY"})
+
+    def test_fallback_returns_empty_when_no_key_found(self):
+        with patch("exporter.llm_client.OPENROUTER_KEY", ""), \
+             patch("exporter.llm_client.load_env_keys", return_value={}):
+            key = llm_client.load_openrouter_key()
+            self.assertEqual(key, "")
+
+    def test_fallback_reads_repo_dotenv(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_env = Path(tmpdir) / ".env"
+            # No .env yet: empty result, no crash.
+            with patch("exporter.llm_client.OPENROUTER_KEY", ""), \
+                 patch.dict("os.environ", {"MEETCAP_BASE_DIR": tmpdir}):
+                self.assertEqual(llm_client.load_openrouter_key(), "")
+
+            # Repo .env is the single fallback source.
+            repo_env.write_text("OPENROUTER_API_KEY=synthetic-meetcap\nOTHER_SECRET=leak\n")
+            with patch("exporter.llm_client.OPENROUTER_KEY", ""), \
+                 patch.dict("os.environ", {"MEETCAP_BASE_DIR": tmpdir}):
+                self.assertEqual(llm_client.load_openrouter_key(), "synthetic-meetcap")
+
+
 if __name__ == "__main__":
     unittest.main()

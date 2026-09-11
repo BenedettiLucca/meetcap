@@ -20,14 +20,19 @@ from datetime import datetime
 from pathlib import Path
 
 import doctor
+import runtime_paths
+from runtime_paths import pid_is_meetcap
 
 # ── Config ──────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent.parent
 RECORDINGS_DIR = BASE_DIR / "recordings"
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
-SOCKET_PATH = Path("/tmp/meetcap.sock")
-PID_FILE = Path("/tmp/meetcap.pid")
-STATE_FILE = Path("/tmp/meetcap_state.json")
+SOCKET_PATH = runtime_paths.socket_path()
+PID_FILE = runtime_paths.pid_path()
+STATE_FILE = runtime_paths.state_path()
+LOG_PATH = runtime_paths.log_path()
+
+SOCKET_TIMEOUT = float(os.environ.get("MEETCAP_SOCKET_TIMEOUT", "2.0"))
 
 WHISPER_MODEL = os.environ.get("MEETCAP_MODEL", "deepdml/faster-whisper-large-v3-turbo-ct2")
 # Normalize the legacy canonical name to the pinned repo so in-proc fallback
@@ -45,6 +50,7 @@ class State:
     is_recording = False
     is_transcribing = False
     last_error = None
+    recording_since = None  # ISO-8601 BRT timestamp when recording started (#42)
 
 state = State()
 state_lock = threading.Lock()
@@ -57,7 +63,9 @@ def save_state():
         "transcribing": state.is_transcribing,
         "last_file": str(state.recording_file) if state.recording_file else None,
         "error": state.last_error,
+        "recording_since": state.recording_since,
     }
+    runtime_paths.ensure_runtime_dir(STATE_FILE.parent)
     STATE_FILE.write_text(json.dumps(data))
 
 
@@ -76,8 +84,60 @@ def get_audio_sources():
 
 
 # ── Recording ────────────────────────────────────────────────────────
+def _unique_wav_path(recordings_dir: Path, ts: str) -> Path:
+    """Return a WAV path that does not yet exist.
+
+    If ``meeting-<ts>.wav`` already exists, append ``-1``, ``-2``, ... until
+    a free slot is found.  Never returns a path that points to an existing file,
+    so ffmpeg is never passed ``-y`` against an existing recording (#33).
+    """
+    candidate = recordings_dir / f"meeting-{ts}.wav"
+    if not candidate.exists():
+        return candidate
+    n = 1
+    while True:
+        candidate = recordings_dir / f"meeting-{ts}-{n}.wav"
+        if not candidate.exists():
+            return candidate
+        n += 1
+
+
+def _recording_watcher(proc, wav_path, stop_event: threading.Event):
+    """Background thread: poll ffmpeg every 2 s, act if it dies unexpectedly (#11)."""
+    while not stop_event.wait(2.0):
+        rc = proc.poll()
+        if rc is None:
+            continue  # still running
+
+        # Process died.  Check whether stop_recording already cleaned up.
+        with state_lock:
+            if state.recording_proc is not proc:
+                # stop_recording already handled it — nothing to do.
+                return
+            # Unexpected death: clean state.
+            state.is_recording = False
+            state.recording_proc = None
+            state.recording_since = None
+            msg = f"ffmpeg died unexpectedly (rc={rc}); file may be truncated: {wav_path.name}"
+            state.last_error = msg
+            save_state()
+
+        notify("Meetcap", "❌ Recording interrupted", msg[:180])
+        print(f"[WATCHER] {msg}")
+        return
+
+
 def start_recording():
     with state_lock:
+        # #11: if there's a lingering proc that already died, clean state before checking.
+        if state.recording_proc is not None and state.recording_proc.poll() is not None:
+            state.recording_proc = None
+            state.is_recording = False
+            state.recording_since = None
+            if not state.last_error:
+                state.last_error = "Previous ffmpeg process died unexpectedly"
+            save_state()
+
         if state.is_recording:
             return {"ok": False, "error": "Already recording"}
 
@@ -86,13 +146,16 @@ def start_recording():
             return {"ok": False, "error": "No audio sources detected"}
 
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        wav_file = RECORDINGS_DIR / f"meeting-{ts}.wav"
+        wav_file = _unique_wav_path(RECORDINGS_DIR, ts)  # #33: collision-safe
         log_file = wav_file.with_suffix(".ffmpeg.log")
         state.recording_file = wav_file
         state.recording_log = log_file
 
+        # #33: never pass -y against a file that already exists.
+        # _unique_wav_path guarantees wav_file doesn't exist, but we keep -y removed
+        # to ensure we never silently overwrite; ffmpeg will error instead of clobbering.
         cmd = [
-            "ffmpeg", "-y",
+            "ffmpeg",
             "-f", "pulse", "-i", mic_src,
             "-f", "pulse", "-i", sys_src,
             "-filter_complex",
@@ -122,13 +185,26 @@ def start_recording():
                 state.last_error += f": {error_tail}"
             state.recording_proc = None
             state.is_recording = False
+            state.recording_since = None
             save_state()
             notify("Meetcap", "❌ Recording failed", state.last_error[:180])
             return {"ok": False, "error": state.last_error, "log": str(log_file)}
 
+        # #42: stamp when recording truly started (BRT = UTC-3, fixed offset).
+        now_brt = datetime.now().astimezone()
+        state.recording_since = now_brt.isoformat()
         state.is_recording = True
         state.last_error = None
         save_state()
+
+        # #11: spawn watcher thread to detect unexpected ffmpeg death.
+        _stop_watcher = threading.Event()
+        state._stop_watcher = _stop_watcher  # keep ref so stop_recording can signal it
+        threading.Thread(
+            target=_recording_watcher,
+            args=(state.recording_proc, wav_file, _stop_watcher),
+            daemon=True,
+        ).start()
 
     # Send desktop notification
     notify("Meetcap", "🎙 Recording started", f"mic={mic_src}\nsys={sys_src}")
@@ -136,10 +212,31 @@ def start_recording():
     return {"ok": True, "file": str(wav_file)}
 
 
+
 def stop_recording():
     with state_lock:
+        # #11: if proc exists but is already dead (watcher may not have fired yet),
+        # refuse to pretend we stopped it cleanly.
+        if state.recording_proc is not None and state.recording_proc.poll() is not None:
+            # Ghost process — watcher will/has cleaned state.  Return informative error.
+            proc_rc = state.recording_proc.returncode
+            state.recording_proc = None
+            state.is_recording = False
+            state.recording_since = None
+            state.last_error = (
+                f"Recording process had already died (rc={proc_rc}); "
+                f"file may be truncated: {state.recording_file}"
+            )
+            save_state()
+            return {"ok": False, "error": state.last_error}
+
         if not state.is_recording or not state.recording_proc:
             return {"ok": False, "error": "Not recording"}
+
+        # Signal watcher to stop before we nullify recording_proc.
+        stop_ev = getattr(state, "_stop_watcher", None)
+        if stop_ev is not None:
+            stop_ev.set()
 
         try:
             state.recording_proc.communicate(input=b"q", timeout=5)
@@ -150,6 +247,7 @@ def stop_recording():
         wav = state.recording_file
         state.is_recording = False
         state.recording_proc = None
+        state.recording_since = None  # #42: clear since on stop
         if not wav or not wav.exists() or wav.stat().st_size <= 44:
             state.last_error = f"Recording stopped but WAV was not created or is empty: {wav}"
             save_state()
@@ -161,6 +259,7 @@ def stop_recording():
     notify("Meetcap", f"⏹ Recording saved", str(wav.name) if wav else "")
     print(f"[STOPPED] {wav}")
     return {"ok": True, "file": str(wav)}
+
 
 
 # ── Transcription ────────────────────────────────────────────────────
@@ -221,7 +320,9 @@ def transcribe_via_router(wav_path):
         lines.append(f"[{start} → {end}] {seg['text'].strip()}")
     transcript = "\n".join(lines)
     txt_path = wav_path.with_suffix(".txt")
-    txt_path.write_text(transcript)
+    tmp_path = wav_path.with_suffix(".tmp")
+    tmp_path.write_text(transcript)
+    os.replace(tmp_path, txt_path)  # atomic: crash can't leave partial txt (#37)
     print(f"[DONE via router] {txt_path}")
     return str(txt_path)
 
@@ -260,7 +361,9 @@ def transcribe(wav_path):
 
             transcript = "\n".join(lines)
             txt_path = wav_path.with_suffix(".txt")
-            txt_path.write_text(transcript)
+            tmp_path = wav_path.with_suffix(".tmp")
+            tmp_path.write_text(transcript)
+            os.replace(tmp_path, txt_path)
             print(f"[DONE] {txt_path}")
             return str(txt_path)
         finally:
@@ -297,6 +400,26 @@ def transcribe(wav_path):
     raise last_error
 
 
+def _is_transcript_complete(txt_path: Path) -> bool:
+    """Check whether a .txt transcript exists and is complete (#37).
+
+    A transcript is considered incomplete (resumable) if it does not exist,
+    is 0 bytes, or does not contain the '---' header separator.
+    """
+    try:
+        if not txt_path.is_file():
+            return False
+        if txt_path.stat().st_size == 0:
+            return False
+        content = txt_path.read_text(encoding="utf-8", errors="replace")
+        for line in content.splitlines():
+            if line.strip() == "---":
+                return True
+        return False
+    except OSError:
+        return False
+
+
 def do_transcribe_last():
     """Transcribe the most recent WAV. Called in background thread."""
     with state_lock:
@@ -305,10 +428,10 @@ def do_transcribe_last():
         wavs = sorted(RECORDINGS_DIR.glob("*.wav"), key=lambda p: p.stat().st_mtime, reverse=True)
         if not wavs:
             return {"ok": False, "error": "No recordings found"}
-        # Skip if .txt already exists
+        # Skip if .txt already exists and is complete (#37)
         wav = None
         for w in wavs:
-            if not w.with_suffix(".txt").exists():
+            if not _is_transcript_complete(w.with_suffix(".txt")):
                 wav = w
                 break
         if not wav:
@@ -317,9 +440,8 @@ def do_transcribe_last():
         state.last_error = None
         save_state()
 
-    notify("Meetcap", "📝 Transcribing...", wav.name)
-
     try:
+        notify("Meetcap", "📝 Transcribing...", wav.name)
         try:
             # HTTP-first: router arbitrates VRAM with the rest of the local stack
             txt = transcribe_via_router(wav)
@@ -329,17 +451,16 @@ def do_transcribe_last():
         notify("Meetcap", "✅ Transcript done", os.path.basename(txt))
         # Auto-export to Obsidian vault with AI summary
         threading.Thread(target=auto_export, args=(txt,), daemon=True).start()
-        with state_lock:
-            state.is_transcribing = False
-            save_state()
         return {"ok": True, "file": txt}
     except Exception as e:
         with state_lock:
-            state.is_transcribing = False
             state.last_error = str(e)
-            save_state()
         notify("Meetcap", "❌ Transcription failed", str(e))
         return {"ok": False, "error": str(e)}
+    finally:
+        with state_lock:
+            state.is_transcribing = False
+            save_state()
 
 
 def auto_export(txt_path: str):
@@ -371,21 +492,38 @@ def _reset_transcribing_on_fail():
     notify("Meetcap", "❌ Transcription failed", "Check logs for details")
     print("[WATCHDOG] Cleared stuck transcribing state")
 
-def transcribe_cmd():
+def _transcription_watchdog(t: threading.Thread, timeout: float = 3600.0) -> None:
+    """Watchdog for transcription thread (#15).
+
+    Waits up to `timeout` seconds for the transcription thread to complete.
+    If the thread is still alive after the timeout, leaves state intact.
+    If the thread died without resetting `is_transcribing`, cleans up stuck state.
+    """
+    t.join(timeout=timeout)
+    if t.is_alive():
+        print(f"[WATCHDOG] Transcription thread still alive after timeout ({timeout}s); leaving state intact")
+        return
+
+    with state_lock:
+        if state.is_transcribing:
+            state.is_transcribing = False
+            save_state()
+            notify("Meetcap", "⚠️ Transcription watchdog triggered", "Thread finished but state was stuck")
+            print("[WATCHDOG] Cleared stuck transcribing state (thread finished)")
+
+
+def transcribe_cmd(watchdog_timeout: float = 3600.0):
     """Handle transcribe command — runs in background."""
     if state.is_recording:
         return {"ok": False, "error": "Stop recording first"}
     t = threading.Thread(target=do_transcribe_last, daemon=True)
     t.start()
     # Start watchdog: if thread dies without resetting is_transcribing, clear it
-    def watchdog():
-        t.join(timeout=3600)
-        with state_lock:
-            if state.is_transcribing:
-                state.is_transcribing = False
-                save_state()
-                notify("Meetcap", "⚠️ Transcription watchdog triggered", "Thread finished but state was stuck")
-    threading.Thread(target=watchdog, daemon=True).start()
+    threading.Thread(
+        target=_transcription_watchdog,
+        args=(t, watchdog_timeout),
+        daemon=True,
+    ).start()
     return {"ok": True, "status": "transcription started"}
 
 
@@ -411,6 +549,7 @@ def handle_command(cmd):
             "transcribing": state.is_transcribing,
             "last_file": str(state.recording_file) if state.recording_file else None,
             "error": state.last_error,
+            "recording_since": state.recording_since,  # #42: ISO-8601 BRT or None
         }
     elif cmd == "record":
         return start_recording()
@@ -433,6 +572,7 @@ def handle_command(cmd):
 def client_handler(conn):
     """Handle a single client connection."""
     try:
+        conn.settimeout(SOCKET_TIMEOUT)
         data = conn.recv(4096).decode().strip()
         if data:
             response = handle_command(data)
@@ -446,11 +586,44 @@ def client_handler(conn):
         conn.close()
 
 
+def acquire_single_instance(sock_path=None, timeout=1.0) -> bool:
+    """Ensure no live meetcap daemon is running before taking over sock_path.
+
+    Returns True if instance can proceed (no socket or orphan socket unlinked).
+    Returns False if a live daemon responded on the socket (do not unlink).
+    """
+    if sock_path is None:
+        sock_path = SOCKET_PATH
+    path = Path(sock_path)
+    if not path.exists():
+        return True
+
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect(str(path))
+        s.sendall(b"status\n")
+        reply = s.recv(1024)
+        if reply:
+            return False
+    except OSError:
+        pass
+    finally:
+        s.close()
+
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    return True
+
+
 def run_server():
     """UNIX socket server main loop."""
-    # Clean stale socket
-    if SOCKET_PATH.exists():
-        SOCKET_PATH.unlink()
+    runtime_paths.ensure_runtime_dir(SOCKET_PATH.parent)
+    if not acquire_single_instance(SOCKET_PATH):
+        print(f"[DAEMON] Another meetcap daemon is already running on {SOCKET_PATH}", file=sys.stderr)
+        sys.exit(1)
 
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(str(SOCKET_PATH))
@@ -469,6 +642,7 @@ def run_server():
     signal.signal(signal.SIGINT, shutdown)
 
     # Write PID file
+    runtime_paths.ensure_runtime_dir(PID_FILE.parent)
     PID_FILE.write_text(str(os.getpid()))
 
     while running:
@@ -493,25 +667,44 @@ def run_server():
 
 
 # ── CLI ──────────────────────────────────────────────────────────────
-def _send(cmd):
+def _resolve_socket():
+    # ponytail: no /tmp glob fallback — cross-user socket discovery defeats #18 isolation
+    return SOCKET_PATH
+
+
+def _send(cmd, timeout=SOCKET_TIMEOUT, sock_path=None):
     """Send a command to the daemon and return the raw response, or None."""
+    s = None
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.connect(str(SOCKET_PATH))
+        s.settimeout(timeout)
+        target = sock_path or _resolve_socket()
+        s.connect(str(target))
         s.sendall((cmd + "\n").encode())
         data = s.recv(4096).decode().strip()
-        s.close()
         return data
+    except (socket.timeout, TimeoutError):
+        raise TimeoutError("Timed out waiting for daemon response")
     except OSError:
         return None
+    finally:
+        if s is not None:
+            try:
+                s.close()
+            except OSError:
+                pass
 
 
-def send_command(cmd):
+def send_command(cmd, sock_path=None):
     """Send a command to the daemon and return the response."""
-    if not SOCKET_PATH.exists():
+    target = sock_path or _resolve_socket()
+    if not target.exists():
         print("Meetcap daemon is not running", file=sys.stderr)
         sys.exit(1)
-    data = _send(cmd)
+    try:
+        data = _send(cmd, sock_path=target)
+    except TimeoutError:
+        raise
     if data is None:
         print("Error communicating with daemon", file=sys.stderr)
         sys.exit(1)
@@ -546,7 +739,10 @@ def status_cmd():
         diagnosis = doctor.diagnose(SOCKET_PATH, PID_FILE)
         print(doctor.format_report(diagnosis))
         sys.exit(1)
-    daemon_status = _send("status")
+    try:
+        daemon_status = _send("status")
+    except TimeoutError:
+        daemon_status = None
     svc = doctor.check_service()
     pid = doctor.read_pid(PID_FILE)
     print(f"Daemon: running (pid {pid})")
@@ -558,7 +754,8 @@ def status_cmd():
 
 def _spawn_manual_daemon():
     doctor.clean_stale_files(SOCKET_PATH, PID_FILE)
-    log_path = Path("/tmp/meetcap-daemon.log")
+    log_path = LOG_PATH
+    runtime_paths.ensure_runtime_dir(log_path.parent)
     with log_path.open("ab") as log:
         subprocess.Popen(
             [sys.executable, str(Path(__file__).resolve()), "daemon"],
@@ -588,6 +785,18 @@ def start_cmd():
         sys.exit(1)
 
 
+def stop_daemon():
+    """Stop running meetcap daemon safely (guarding PID reuse)."""
+    pid = doctor.read_pid(PID_FILE)
+    if pid and not pid_is_meetcap(pid):
+        print(f"[STOP] Stale PID {pid} is not meetcap, cleaning up without killing")
+        doctor.clean_stale_files(SOCKET_PATH, PID_FILE)
+        return True
+    stopped = doctor.stop_pid(pid)
+    doctor.clean_stale_files(SOCKET_PATH, PID_FILE)
+    return stopped
+
+
 def restart_cmd():
     svc = doctor.check_service()
     if svc["installed"]:
@@ -598,8 +807,12 @@ def restart_cmd():
             sys.exit(1)
     else:
         pid = doctor.read_pid(PID_FILE)
-        if doctor.stop_pid(pid):
-            print("[RESTART] Stopped old daemon")
+        if pid and not pid_is_meetcap(pid):
+            print(f"[RESTART] Stale PID {pid} is not meetcap, cleaning up")
+            doctor.clean_stale_files(None, PID_FILE)
+        else:
+            if doctor.stop_pid(pid):
+                print("[RESTART] Stopped old daemon")
         doctor.clean_stale_files(SOCKET_PATH, PID_FILE)
         _spawn_manual_daemon()
     if wait_for_socket():
@@ -640,12 +853,18 @@ def main():
         start_cmd()
     elif cmd == "restart":
         restart_cmd()
+    elif cmd == "stop-daemon":
+        stop_daemon()
     elif cmd == "install-service":
         install_service_cmd()
     else:
         # Client mode — send command to daemon
-        response = send_command(cmd)
-        print(response)
+        try:
+            response = send_command(cmd)
+            print(response)
+        except TimeoutError as e:
+            print(f"Error communicating with daemon: {e}", file=sys.stderr)
+            sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -3,8 +3,15 @@
 # Usage: bind to a key in Hyprland
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SOCKET="/tmp/meetcap.sock"
-STATE="/tmp/meetcap_state.json"
+if [ -n "$MEETCAP_RUNTIME_DIR" ]; then
+    RUNTIME_DIR="$MEETCAP_RUNTIME_DIR"
+elif [ -n "$XDG_RUNTIME_DIR" ]; then
+    RUNTIME_DIR="$XDG_RUNTIME_DIR/meetcap"
+else
+    RUNTIME_DIR="/run/user/$(id -u)/meetcap"
+fi
+SOCKET="$RUNTIME_DIR/meetcap.sock"
+STATE="$RUNTIME_DIR/meetcap_state.json"
 
 daemon_ok() {
     [ -S "$SOCKET" ] && [ -n "$(echo 'status' | socat -t 2 - UNIX-CONNECT:"$SOCKET" 2>/dev/null)" ]
@@ -34,7 +41,46 @@ send_cmd() {
             exit 1
         fi
     fi
-    echo "$1" | socat - UNIX-CONNECT:"$SOCKET" 2>/dev/null
+    local response
+    response=$(echo "$1" | socat - UNIX-CONNECT:"$SOCKET" 2>/dev/null)
+    # Parse response: notify on {"ok": false, ...} or invalid/empty JSON
+    _notify_on_error "$response"
+}
+
+# Parse daemon JSON response; call notify-send if ok==false or response is unusable.
+_notify_on_error() {
+    local resp="$1"
+    if [ -z "$resp" ]; then
+        notify-send "Meetcap" "⚠️ Sem resposta do daemon (comunicação falhou)"
+        return
+    fi
+    # Use python3 one-liner consistent with state-reading style above
+    local ok errmsg
+    ok=$(python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+    print('false' if d.get('ok') is False else 'true')
+except Exception:
+    print('invalid')
+" "$resp" 2>/dev/null)
+    case "$ok" in
+        false)
+            errmsg=$(python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+    print(str(d.get('error', 'Erro desconhecido'))[:200])
+except Exception:
+    print('Erro desconhecido')
+" "$resp" 2>/dev/null)
+            notify-send "Meetcap" "⚠️ ${errmsg}"
+            ;;
+        invalid)
+            notify-send "Meetcap" "⚠️ Falha de comunicação com o daemon"
+            ;;
+        # ok==true: success, no notification needed
+    esac
 }
 
 # Read current state
@@ -58,13 +104,13 @@ choice=$(echo -e "$options" | rofi -dmenu -i -p "Meetcap" -theme-str 'window { w
 
 case "$choice" in
     *"Start Recording"*)
-        send_cmd "record" > /dev/null
+        send_cmd "record"
         ;;
     *"Stop Recording"*)
-        send_cmd "stop" > /dev/null
+        send_cmd "stop"
         ;;
     *"Transcribe Last"*)
-        send_cmd "transcribe" > /dev/null
+        send_cmd "transcribe"
         ;;
     *"Open Recordings"*)
         xdg-open "$SCRIPT_DIR/recordings" 2>/dev/null
