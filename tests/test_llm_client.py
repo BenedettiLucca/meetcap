@@ -178,7 +178,7 @@ class LoadOpenRouterKeyTests(unittest.TestCase):
             key = llm_client.load_openrouter_key()
             self.assertEqual(key, "")
 
-    def test_fallback_file_precedence(self):
+    def test_fallback_reads_only_dedicated_meetcap_env(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             fake_home = Path(tmpdir)
@@ -187,15 +187,16 @@ class LoadOpenRouterKeyTests(unittest.TestCase):
             meetcap_env.parent.mkdir(parents=True, exist_ok=True)
             hermes_env.parent.mkdir(parents=True, exist_ok=True)
 
+            # Only the hermes file exists: it must NOT be read at all.
             hermes_env.write_text("OPENROUTER_API_KEY=synthetic-hermes\nOTHER_SECRET=leak\n")
-
             with patch("exporter.llm_client.OPENROUTER_KEY", ""), \
                  patch("pathlib.Path.home", return_value=fake_home):
-                # When only hermes exists, returns hermes key
-                self.assertEqual(llm_client.load_openrouter_key(), "synthetic-hermes")
+                self.assertEqual(llm_client.load_openrouter_key(), "")
 
-                # When meetcap env also exists, it takes precedence
-                meetcap_env.write_text("OPENROUTER_API_KEY=synthetic-meetcap\nOTHER_SECRET=leak\n")
+            # The dedicated meetcap env file is the single fallback source.
+            meetcap_env.write_text("OPENROUTER_API_KEY=synthetic-meetcap\nOTHER_SECRET=leak\n")
+            with patch("exporter.llm_client.OPENROUTER_KEY", ""), \
+                 patch("pathlib.Path.home", return_value=fake_home):
                 self.assertEqual(llm_client.load_openrouter_key(), "synthetic-meetcap")
 
 

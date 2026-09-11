@@ -34,19 +34,13 @@ class LLMResponseError(LLMError):
 
 
 def load_openrouter_key() -> str:
-    """Load OpenRouter API key from config/env or fallback env files with minimal privilege."""
+    """Load OpenRouter API key from env or the dedicated meetcap env file."""
     if OPENROUTER_KEY:
         return OPENROUTER_KEY
 
-    for candidate in (
-        Path.home() / ".config" / "meetcap" / "env",
-        Path.home() / ".hermes" / ".env",
-    ):
-        keys = load_env_keys(candidate, allowed={"OPENROUTER_API_KEY"})
-        val = keys.get("OPENROUTER_API_KEY", "").strip()
-        if val:
-            return val
-    return ""
+    candidate = Path.home() / ".config" / "meetcap" / "env"
+    keys = load_env_keys(candidate, allowed={"OPENROUTER_API_KEY"})
+    return keys.get("OPENROUTER_API_KEY", "").strip()
 
 
 def should_retry_without_structured_output(error: RuntimeError) -> bool:
