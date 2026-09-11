@@ -165,7 +165,7 @@ The only hard dependency is `faster-whisper`. The exporter uses stdlib + `curl` 
 ### API keys
 
 - **OpenRouter API key** — for AI summary + task suggestions. Set `OPENROUTER_API_KEY` in your environment or `~/.hermes/.env`.
-- The LLM model defaults to `deepseek/deepseek-v4-flash` but is configurable via `MEETCAP_LLM_MODEL`.
+- The LLM model defaults to `qwen/qwen3.7-flash` but is configurable via `MEETCAP_LLM_MODEL`.
 
 ---
 
@@ -191,7 +191,7 @@ export OPENROUTER_API_KEY="sk-or-..."
 export MEETCAP_MODEL="large-v3-turbo"    # whisper model
 export MEETCAP_DEVICE="cuda"             # or "cpu"
 export MEETCAP_COMPUTE="float16"         # or "float32", "int8"
-export MEETCAP_LLM_MODEL="deepseek/deepseek-v4-flash"
+export MEETCAP_LLM_MODEL="qwen/qwen3.7-flash"
 
 # Optional: Obsidian vault path (defaults to ~/vault)
 export OBSIDIAN_VAULT_PATH="/path/to/your/vault"
@@ -211,7 +211,7 @@ Type=simple
 Environment=MEETCAP_MODEL=large-v3-turbo
 Environment=MEETCAP_DEVICE=cuda
 Environment=MEETCAP_COMPUTE=float16
-Environment=MEETCAP_LLM_MODEL=deepseek/deepseek-v4-flash
+Environment=MEETCAP_LLM_MODEL=qwen/qwen3.7-flash
 ExecStart=/path/to/.venv/bin/python /path/to/src/meetcap.py daemon
 Restart=on-failure
 RestartSec=3
@@ -333,7 +333,7 @@ meetcap/
 | `MEETCAP_MODEL` | `large-v3-turbo` | Whisper model size |
 | `MEETCAP_DEVICE` | `cuda` | Compute device (`cuda`, `cpu`) |
 | `MEETCAP_COMPUTE` | `float16` | Compute type (`float16`, `float32`, `int8`) |
-| `MEETCAP_LLM_MODEL` | `deepseek/deepseek-v4-flash` | LLM model for summary + tasks |
+| `MEETCAP_LLM_MODEL` | `qwen/qwen3.7-flash` | LLM model for summary + tasks |
 | `OBSIDIAN_VAULT_PATH` | `~/vault` | Path to your Obsidian vault |
 
 ---

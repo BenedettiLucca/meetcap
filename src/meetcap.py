@@ -29,7 +29,11 @@ SOCKET_PATH = Path("/tmp/meetcap.sock")
 PID_FILE = Path("/tmp/meetcap.pid")
 STATE_FILE = Path("/tmp/meetcap_state.json")
 
-WHISPER_MODEL = os.environ.get("MEETCAP_MODEL", "large-v3-turbo")
+WHISPER_MODEL = os.environ.get("MEETCAP_MODEL", "deepdml/faster-whisper-large-v3-turbo-ct2")
+# Normalize the legacy canonical name to the pinned repo so in-proc fallback
+# shares the same HF cache as the router worker (single 1.6G copy, not two).
+if WHISPER_MODEL == "large-v3-turbo":
+    WHISPER_MODEL = "deepdml/faster-whisper-large-v3-turbo-ct2"
 WHISPER_DEVICE = os.environ.get("MEETCAP_DEVICE", "cuda")
 WHISPER_COMPUTE = os.environ.get("MEETCAP_COMPUTE", "float16")
 
@@ -165,6 +169,63 @@ def format_timestamp(seconds):
     return f"{m:02d}:{s:02d}"
 
 
+ROUTER_TRANSCRIBE_URL = "http://127.0.0.1:8090/v1/audio/transcriptions"
+
+
+def transcribe_via_router(wav_path):
+    """HTTP-first transcription through the local model router.
+
+    The router arbitrates VRAM (swaps out any resident LLM for the whisper
+    worker), so meetcap no longer has to win the GPU lottery on its own.
+    Returns the .txt path, or raises on any failure (caller falls back in-proc).
+    """
+    import urllib.request
+    import uuid as _uuid
+
+    boundary = _uuid.uuid4().hex
+    with open(wav_path, "rb") as f:
+        audio = f.read()
+    parts = []
+    for name, value in [("model", "whisper-turbo"), ("response_format", "json")]:
+        parts.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
+        )
+    parts.append(
+        f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{wav_path.name}"\r\n'
+        f"Content-Type: audio/wav\r\n\r\n".encode() + audio + b"\r\n"
+    )
+    parts.append(f"--{boundary}--\r\n".encode())
+    body = b"".join(parts)
+
+    req = urllib.request.Request(
+        ROUTER_TRANSCRIBE_URL, data=body, method="POST",
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    with urllib.request.urlopen(req, timeout=1800) as resp:
+        result = json.loads(resp.read())
+
+    lines = [
+        "# Meetcap Transcript",
+        f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        f"File: {wav_path.name}",
+        f"Model: {result.get('model', 'whisper-turbo')} (router/cuda/float16)",
+        f"Language: {result.get('language', '?')}",
+        f"Duration: {result.get('duration', 0):.1f}s",
+        "",
+        "---",
+        "",
+    ]
+    for seg in result.get("segments", []):
+        start = format_timestamp(seg["start"])
+        end = format_timestamp(seg["end"])
+        lines.append(f"[{start} → {end}] {seg['text'].strip()}")
+    transcript = "\n".join(lines)
+    txt_path = wav_path.with_suffix(".txt")
+    txt_path.write_text(transcript)
+    print(f"[DONE via router] {txt_path}")
+    return str(txt_path)
+
+
 def transcribe(wav_path):
     from faster_whisper import WhisperModel
 
@@ -209,7 +270,7 @@ def transcribe(wav_path):
     attempts = []
     for candidate in [
         (WHISPER_MODEL, WHISPER_DEVICE, WHISPER_COMPUTE),
-        ("large-v3-turbo", "cuda", "float16"),
+        ("deepdml/faster-whisper-large-v3-turbo-ct2", "cuda", "float16"),
         ("medium", "cuda", "float16"),
         ("medium", "cpu", "int8"),
     ]:
@@ -259,7 +320,12 @@ def do_transcribe_last():
     notify("Meetcap", "📝 Transcribing...", wav.name)
 
     try:
-        txt = transcribe(wav)
+        try:
+            # HTTP-first: router arbitrates VRAM with the rest of the local stack
+            txt = transcribe_via_router(wav)
+        except Exception as e:
+            print(f"[WHISPER] Router path failed ({e}); falling back to in-proc")
+            txt = transcribe(wav)
         notify("Meetcap", "✅ Transcript done", os.path.basename(txt))
         # Auto-export to Obsidian vault with AI summary
         threading.Thread(target=auto_export, args=(txt,), daemon=True).start()

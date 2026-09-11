@@ -1,5 +1,18 @@
 # Meetcap Sprint Plan
 
+## Plano atual — Sprint 5 (proposta, 2026-09-10)
+
+[Capture Safety & Data Integrity — plano detalhado](plans/2026-09-10-sprint-5-capture-integrity.md)
+
+- Triage das 33 issues abertas; proposta de 15 issues em duas semanas, até três lanes paralelas.
+- AGY Gemini + AGY Claude + OpenCode, ownership por arquivo, contratos RED, gates e handoff para Core GLM 5.3 Flash.
+- Status: aguardando aprovação; nenhuma implementação, commit, push ou alteração do serviço iniciada pelo planejamento.
+- [Baseline e limitações da verificação](plans/2026-09-10-sprint-5-baseline.md).
+
+## Histórico — plano original das Sprints 1–4
+
+As premissas abaixo pertencem ao plano original, não ao dimensionamento da Sprint 5.
+
 > Source: review of open issues at https://github.com/BenedettiLucca/meetcap/issues
 > Assumptions: 1 engineer, 2-week sprints, ~12-15 points per sprint. Total: ~50 pts across 4 sprints.
 

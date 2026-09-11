@@ -8,7 +8,7 @@ Environment=LD_LIBRARY_PATH=/home/lucca/Projects/meetcap/.venv/lib/python3.11/si
 Environment=MEETCAP_MODEL=large-v3-turbo
 Environment=MEETCAP_DEVICE=cuda
 Environment=MEETCAP_COMPUTE=float16
-Environment=MEETCAP_LLM_MODEL=deepseek/deepseek-v4-flash
+Environment=MEETCAP_LLM_MODEL=qwen/qwen3.7-flash
 Environment=OBSIDIAN_VAULT_PATH=/home/lucca/HD2/vault
 EnvironmentFile=/home/lucca/.hermes/.env
 ExecStart=/home/lucca/Projects/meetcap/.venv/bin/python /home/lucca/Projects/meetcap/src/meetcap.py daemon
