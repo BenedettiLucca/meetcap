@@ -35,7 +35,7 @@ Meetcap is designed for **sensitive meeting material**. A public repo is only sa
 
 - **Never commit raw meeting artifacts** (`.wav`, transcript `.txt`, exported meeting `.md` notes)
 - **Never commit real client/project examples** into docs or fixtures
-- **Never hardcode API keys** — use env vars or `~/.config/meetcap/env`
+- **Never hardcode API keys** — use env vars or the repo `.env` (gitignored)
 - Before pushing, run a quick audit:
   - `git ls-files | grep -iE "\\.env|recordings|transcript|meeting-.*\\.txt|\\.wav"`
   - `git ls-files -z | xargs -0 grep -rlP '(api[_-]?key|secret|password|token)\\s*[=:]\\s*["\\x27]?[a-zA-Z0-9]{20,}'`
@@ -118,7 +118,7 @@ Meetcap was built to work with [Hermes Agent](https://hermes-agent.nousresearch.
 
 ### How they connect
 
-1. **Dedicated credentials** — Meetcap loads its OpenRouter key from `~/.config/meetcap/env` (or environment), with safe allowlist fallback to `~/.hermes/.env` (extracting only `OPENROUTER_API_KEY`, without shell/eval)
+1. **Dedicated credentials** — Meetcap loads its OpenRouter key from the repo `.env` (or environment), with a safe allowlist read (extracting only `OPENROUTER_API_KEY`, without shell/eval)
 2. **Hermes cron jobs can process transcripts** — scheduled jobs (e.g., a nightly "Meeting Notes Processor") can call `export_to_vault.py` on new recordings
 3. **Hermes skills consume the notes** — Obsidian skills (`obsidian-core`, `obsidian-tasks`) can read meeting notes, extract action items, and update daily task lists
 4. **The vault note footer** marks notes as `Gerado automaticamente pelo Meetcap + Hermes`, creating an audit trail
@@ -164,7 +164,7 @@ The only hard dependency is `faster-whisper`. The exporter uses stdlib + `curl` 
 
 ### API keys
 
-- **OpenRouter API key** — for AI summary + task suggestions. Set `OPENROUTER_API_KEY` in your environment or in `~/.config/meetcap/env` (loaded with a strict allowlist via `src/process_env.py`, no eval/shell).
+- **OpenRouter API key** — for AI summary + task suggestions. Set `OPENROUTER_API_KEY` in your environment or in the repo `.env` (loaded with a strict allowlist via `src/process_env.py`, no eval/shell).
 - The LLM model defaults to `deepseek/deepseek-v4-flash` but is configurable via `MEETCAP_LLM_MODEL`.
 
 ---
@@ -183,10 +183,10 @@ pip install -r requirements-dev.txt
 
 ### 2. Configure environment
 
-Credentials and configuration can be set as environment variables or placed in `~/.config/meetcap/env` (read by both daemon and systemd unit):
+Credentials and configuration can be set as environment variables or placed in the repo `.env` (read by both the CLI wrapper and the systemd unit):
 
 ```bash
-# Required: OpenRouter for AI summaries (in env or ~/.config/meetcap/env)
+# Required: OpenRouter for AI summaries (in env or repo .env)
 export OPENROUTER_API_KEY="sk-or-..."
 
 # Optional: model overrides
@@ -204,7 +204,7 @@ export OBSIDIAN_VAULT_PATH="/path/to/your/vault"
 
 ### 3. Run as a systemd service (recommended)
 
-The provided `meetcap.service` is portable across users using `%h` specifiers (no hardcoded personal paths) and loads secrets from `~/.config/meetcap/env`:
+The provided `meetcap.service` is portable across users using `%h` specifiers (no hardcoded personal paths) and loads the repo `.env`:
 
 ```ini
 [Unit]
@@ -220,7 +220,7 @@ Environment=MEETCAP_DEVICE=cuda
 Environment=MEETCAP_COMPUTE=float16
 Environment=MEETCAP_LLM_MODEL=deepseek/deepseek-v4-flash
 Environment=OBSIDIAN_VAULT_PATH=%h/vault
-EnvironmentFile=-%h/.config/meetcap/env
+EnvironmentFile=-%h/Projects/meetcap/.env
 ExecStart=%h/Projects/meetcap/.venv/bin/python %h/Projects/meetcap/src/meetcap.py daemon
 Restart=on-failure
 RestartSec=3
@@ -345,7 +345,7 @@ meetcap/
 
 | Environment variable | Default | Description |
 |---------------------|---------|-------------|
-| `OPENROUTER_API_KEY` | (from `~/.config/meetcap/env`) | OpenRouter API key for LLM calls |
+| `OPENROUTER_API_KEY` | (from repo `.env`) | OpenRouter API key for LLM calls |
 | `MEETCAP_MODEL` | `large-v3-turbo` | Whisper model size |
 | `MEETCAP_DEVICE` | `cuda` | Compute device (`cuda`, `cpu`) |
 | `MEETCAP_COMPUTE` | `float16` | Compute type (`float16`, `float32`, `int8`) |

@@ -14,13 +14,13 @@ Environment=MEETCAP_MODEL=large-v3-turbo
 Environment=MEETCAP_DEVICE=cuda
 Environment=MEETCAP_COMPUTE=float16
 Environment=MEETCAP_LLM_MODEL=deepseek/deepseek-v4-flash
-# Default Obsidian vault path (can be overridden in %h/.config/meetcap/env)
+# Default Obsidian vault path (can be overridden in the repo .env)
 Environment=OBSIDIAN_VAULT_PATH=%h/vault
 
 # Dedicated meetcap environment file for minimum-privilege credentials and overrides.
-# Create ~/.config/meetcap/env (e.g. OPENROUTER_API_KEY=...) to configure secrets.
+# Configure secrets in the repo .env (e.g. OPENROUTER_API_KEY=...); gitignored.
 # The '-' prefix instructs systemd not to fail if the file does not exist.
-EnvironmentFile=-%h/.config/meetcap/env
+EnvironmentFile=-%h/Projects/meetcap/.env
 
 ExecStart=%h/Projects/meetcap/.venv/bin/python %h/Projects/meetcap/src/meetcap.py daemon
 Restart=on-failure

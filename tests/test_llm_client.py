@@ -178,25 +178,19 @@ class LoadOpenRouterKeyTests(unittest.TestCase):
             key = llm_client.load_openrouter_key()
             self.assertEqual(key, "")
 
-    def test_fallback_reads_only_dedicated_meetcap_env(self):
+    def test_fallback_reads_repo_dotenv(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
-            fake_home = Path(tmpdir)
-            meetcap_env = fake_home / ".config" / "meetcap" / "env"
-            hermes_env = fake_home / ".hermes" / ".env"
-            meetcap_env.parent.mkdir(parents=True, exist_ok=True)
-            hermes_env.parent.mkdir(parents=True, exist_ok=True)
-
-            # Only the hermes file exists: it must NOT be read at all.
-            hermes_env.write_text("OPENROUTER_API_KEY=synthetic-hermes\nOTHER_SECRET=leak\n")
+            repo_env = Path(tmpdir) / ".env"
+            # No .env yet: empty result, no crash.
             with patch("exporter.llm_client.OPENROUTER_KEY", ""), \
-                 patch("pathlib.Path.home", return_value=fake_home):
+                 patch.dict("os.environ", {"MEETCAP_BASE_DIR": tmpdir}):
                 self.assertEqual(llm_client.load_openrouter_key(), "")
 
-            # The dedicated meetcap env file is the single fallback source.
-            meetcap_env.write_text("OPENROUTER_API_KEY=synthetic-meetcap\nOTHER_SECRET=leak\n")
+            # Repo .env is the single fallback source.
+            repo_env.write_text("OPENROUTER_API_KEY=synthetic-meetcap\nOTHER_SECRET=leak\n")
             with patch("exporter.llm_client.OPENROUTER_KEY", ""), \
-                 patch("pathlib.Path.home", return_value=fake_home):
+                 patch.dict("os.environ", {"MEETCAP_BASE_DIR": tmpdir}):
                 self.assertEqual(llm_client.load_openrouter_key(), "synthetic-meetcap")
 
 

@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -34,11 +35,11 @@ class LLMResponseError(LLMError):
 
 
 def load_openrouter_key() -> str:
-    """Load OpenRouter API key from env or the dedicated meetcap env file."""
+    """Load OpenRouter API key from env or the repo .env file."""
     if OPENROUTER_KEY:
         return OPENROUTER_KEY
 
-    candidate = Path.home() / ".config" / "meetcap" / "env"
+    candidate = Path(os.environ.get("MEETCAP_BASE_DIR", Path(__file__).resolve().parents[2])) / ".env"
     keys = load_env_keys(candidate, allowed={"OPENROUTER_API_KEY"})
     return keys.get("OPENROUTER_API_KEY", "").strip()
 
