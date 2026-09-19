@@ -44,6 +44,23 @@ if WHISPER_MODEL == "large-v3-turbo":
 WHISPER_DEVICE = os.environ.get("MEETCAP_DEVICE", "cuda")
 WHISPER_COMPUTE = os.environ.get("MEETCAP_COMPUTE", "float16")
 
+MEETCAP_RETENTION_DAYS = float(os.environ.get("MEETCAP_RETENTION_DAYS", "0"))
+MEETCAP_MIN_FREE_GB = float(os.environ.get("MEETCAP_MIN_FREE_GB", "2.0"))
+
+
+def _get_retention_days() -> float:
+    try:
+        return float(os.environ.get("MEETCAP_RETENTION_DAYS", MEETCAP_RETENTION_DAYS))
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _get_min_free_gb() -> float:
+    try:
+        return float(os.environ.get("MEETCAP_MIN_FREE_GB", MEETCAP_MIN_FREE_GB))
+    except (ValueError, TypeError):
+        return 2.0
+
 # ── State ───────────────────────────────────────────────────────────
 class State:
     recording_proc = None
@@ -142,6 +159,25 @@ def start_recording():
 
         if state.is_recording:
             return {"ok": False, "error": "Already recording"}
+
+        # #36: Disk space preflight check (refuse to record if free space < minimum)
+        min_free_gb = _get_min_free_gb()
+        try:
+            free_bytes = shutil.disk_usage(str(RECORDINGS_DIR)).free
+            free_gb = free_bytes / (1024 ** 3)
+        except OSError:
+            free_gb = 0.0
+
+        if free_gb < min_free_gb:
+            msg = (
+                f"Insufficient disk space: {free_gb:.2f} GB free, "
+                f"minimum required is {min_free_gb:.2f} GB"
+            )
+            state.last_error = msg
+            save_state()
+            notify("Meetcap", "❌ Disk space low", msg[:180])
+            print(f"[RECORDING] {msg}")
+            return {"ok": False, "error": msg}
 
         mic_src, sys_src = get_audio_sources()
         if not mic_src or not sys_src:
@@ -260,6 +296,10 @@ def stop_recording():
 
     notify("Meetcap", f"⏹ Recording saved", str(wav.name) if wav else "")
     print(f"[STOPPED] {wav}")
+    try:
+        purge_old_recordings()
+    except Exception as e:
+        print(f"[RETENTION] Post-recording purge failed: {e}")
     return {"ok": True, "file": str(wav)}
 
 
@@ -412,6 +452,62 @@ def _is_transcript_complete(txt_path: Path) -> bool:
         return False
     except OSError:
         return False
+
+
+def purge_old_recordings(
+    recordings_dir: Path | None = None,
+    retention_days: float | None = None,
+    now: float | None = None,
+) -> list[Path]:
+    """Purge raw WAV recordings older than retention_days (#36).
+
+    Opt-in: default retention_days is 0 (disabled).
+    Conservative rule: never deletes a WAV without a complete transcript
+    (_is_transcript_complete returns True for the corresponding .txt).
+    Returns the list of successfully removed Path objects.
+    """
+    if retention_days is None:
+        retention_days = _get_retention_days()
+
+    if retention_days <= 0:
+        return []
+
+    if recordings_dir is None:
+        recordings_dir = RECORDINGS_DIR
+
+    if not recordings_dir.is_dir():
+        return []
+
+    if now is None:
+        now = time.time()
+
+    cutoff = now - (retention_days * 86400.0)
+    purged: list[Path] = []
+
+    try:
+        wav_files = sorted(recordings_dir.glob("*.wav"))
+    except OSError as e:
+        print(f"[RETENTION] Error scanning {recordings_dir}: {e}")
+        return []
+
+    for wav in wav_files:
+        try:
+            mtime = wav.stat().st_mtime
+            if mtime >= cutoff:
+                continue
+
+            txt = wav.with_suffix(".txt")
+            if not _is_transcript_complete(txt):
+                continue
+
+            wav.unlink()
+            purged.append(wav)
+            age_days = (now - mtime) / 86400.0
+            print(f"[RETENTION] Purged {wav.name} (age: {age_days:.1f} days)")
+        except OSError as e:
+            print(f"[RETENTION] Failed to remove {wav.name}: {e}")
+
+    return purged
 
 
 def do_transcribe_last():
@@ -939,6 +1035,12 @@ def run_server():
     # Write PID file
     runtime_paths.ensure_runtime_dir(PID_FILE.parent)
     PID_FILE.write_text(str(os.getpid()))
+
+    # #36: purge old recordings on daemon startup
+    try:
+        purge_old_recordings()
+    except Exception as e:
+        print(f"[RETENTION] Startup purge failed: {e}")
 
     # #16: reconcile stuck jobs from previous run, then start worker
     reconcile_export_jobs()
