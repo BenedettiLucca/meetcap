@@ -2,7 +2,6 @@
 
 import json
 import os
-import signal
 import socket
 import subprocess
 import sys
@@ -13,7 +12,7 @@ from typing import Any, Callable, Dict, Generator, Optional, Union
 
 import pytest
 
-from tests.fixtures.synthetic import create_synthetic_wav, generate_synthetic_wav_bytes
+from tests.fixtures.synthetic import create_synthetic_wav
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"

@@ -294,7 +294,7 @@ def stop_recording():
         state.last_error = None
         save_state()
 
-    notify("Meetcap", f"⏹ Recording saved", str(wav.name) if wav else "")
+    notify("Meetcap", "⏹ Recording saved", str(wav.name) if wav else "")
     print(f"[STOPPED] {wav}")
     try:
         purge_old_recordings()
@@ -377,7 +377,7 @@ def transcribe(wav_path):
             )
 
             lines = [
-                f"# Meetcap Transcript",
+                "# Meetcap Transcript",
                 f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
                 f"File: {wav_path.name}",
                 f"Model: {model_name} ({device}/{compute_type})",

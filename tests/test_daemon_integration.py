@@ -4,17 +4,10 @@ Exercising REAL subprocesses and REAL UNIX sockets with temporary runtime direct
 No physical audio hardware or PipeWire devices required.
 """
 
-import json
-import os
-import signal
-import subprocess
 import sys
-import time
 from pathlib import Path
 
-import pytest
 
-from tests.fixtures.synthetic import create_synthetic_wav
 
 
 def test_daemon_lifecycle_status_and_clean_shutdown(spawn_daemon, tmp_path):

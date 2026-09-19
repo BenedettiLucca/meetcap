@@ -8,7 +8,6 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from exporter import task_extractor
-from exporter import llm_client
 
 
 CANARY_A = "CANARY-TASK-A-DO-NOT-EXPOSE"

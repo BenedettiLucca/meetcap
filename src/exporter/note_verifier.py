@@ -365,7 +365,7 @@ def render_qa_block(verification: dict[str, Any]) -> str:
         "## 🚩 QA Flags",
         "",
         f"- Coverage score: {coverage_text}",
-        f"- Needs review: yes",
+        "- Needs review: yes",
         f"- Missing decisions: {len(verification.get('decision_gaps', []))}",
         f"- Action item gaps: {len(verification.get('action_item_gaps', []))}",
         f"- Attribution risks: {len(verification.get('speaker_attribution_risks', []))}",

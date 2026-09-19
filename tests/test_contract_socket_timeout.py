@@ -34,7 +34,6 @@ class SocketTimeoutContractTests(unittest.TestCase):
         self.assertTrue(handler_started.wait(timeout=2), "handler thread did not start")
 
         # Peer stays mute — handler must not block forever.
-        alive_after = thread.is_alive()
         thread.join(timeout=5)
         self.assertFalse(
             thread.is_alive(),
@@ -114,7 +113,7 @@ class SocketTimeoutContractTests(unittest.TestCase):
         with patch.object(meetcap, "SOCKET_PATH", sock_path):
             thread = threading.Thread(target=call_send)
             thread.start()
-            finished = thread.join(timeout=5) is None
+            thread.join(timeout=5)
 
         self.assertTrue(
             called.wait(timeout=6),
