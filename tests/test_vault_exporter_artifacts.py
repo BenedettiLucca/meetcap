@@ -175,6 +175,80 @@ class ExportNoteDegradedTests(unittest.TestCase):
         self.assertIn("no key", evidence["error"])
 
 
+class ExportOutcomeTests(unittest.TestCase):
+    """#38: the result contract must expose per-stage degradation so a dead
+    LLM can never surface to the user as an unqualified success."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.meetings = Path(self.tmp.name) / "Meetings"
+
+    def _export(self, *, summary, tasks, claims=None, qa=False, manifest=False, evidence_error=None):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as handle:
+            handle.write(TRANSCRIPT)
+            transcript = Path(handle.name)
+        self.addCleanup(transcript.unlink)
+
+        patches = [
+            patch.object(vault_exporter, "MEETINGS_DIR", self.meetings),
+            patch.object(vault_exporter, "ARTIFACTS_DIR", self.meetings / ".meetcap"),
+            patch.object(vault_exporter, "generate_summary", return_value=summary),
+            patch.object(vault_exporter, "generate_task_suggestions", return_value=tasks),
+            patch.object(vault_exporter, "extract_claims", return_value=claims or dict(CLAIMS_RESULT)),
+            patch.object(vault_exporter, "load_vocabulary", return_value={"canonical": [], "aliases": {}}),
+            patch.object(vault_exporter, "EXPORT_QA_ENABLED", qa),
+            patch.object(vault_exporter, "EXPORT_MANIFEST_ENABLED", manifest),
+        ]
+        if evidence_error:
+            patches.append(patch.object(
+                vault_exporter, "build_evidence_artifact", side_effect=OSError(evidence_error)
+            ))
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+        return vault_exporter.export_note(transcript, "Outcome")
+
+    def test_full_llm_failure_is_outcome_failed_but_graceful(self):
+        result = self._export(
+            summary="> [!warning] Summary generation failed: no API key configured",
+            tasks="> [!warning] Task suggestion generation failed: no API key configured.",
+        )
+        self.assertFalse(result["success"])  # failed: rc!=0 even though note was written gracefully
+        self.assertEqual(result["outcome"], "failed")
+        self.assertFalse(result["stages"]["summary"]["ok"])
+        self.assertIn("failed", result["stages"]["summary"]["error"])
+        self.assertFalse(result["stages"]["tasks"]["ok"])
+
+    def test_partial_degradation_is_degraded(self):
+        result = self._export(
+            summary="## 📌 Summary",
+            tasks="> [!warning] Task suggestion generation failed: boom.",
+        )
+        self.assertEqual(result["outcome"], "degraded")
+        self.assertTrue(result["stages"]["summary"]["ok"])
+        self.assertFalse(result["stages"]["tasks"]["ok"])
+        self.assertIn("boom", result["stages"]["tasks"]["error"])
+
+    def test_claims_error_is_degraded(self):
+        claims = {"claims": [], "dropped_unresolved": 0, "error": "claim extraction failed: no key"}
+        result = self._export(summary="## 📌 Summary", tasks="## 🧩", claims=claims)
+        self.assertEqual(result["outcome"], "degraded")
+        self.assertIn("no key", result["stages"]["claims"]["error"])
+
+    def test_clean_export_is_outcome_ok(self):
+        result = self._export(summary="## 📌 Summary", tasks="## 🧩")
+        self.assertEqual(result["outcome"], "ok")
+        self.assertTrue(all(stage["ok"] for stage in result["stages"].values()))
+        self.assertIn("summary", result["stages"])
+        self.assertNotIn("qa", result["stages"])  # disabled feature stays out of the contract
+
+    def test_artifact_failure_is_failed_despite_healthy_stages(self):
+        result = self._export(summary="## 📌 Summary", tasks="## 🧩", evidence_error="disk full")
+        self.assertEqual(result["outcome"], "failed")
+        self.assertTrue(result["stages"]["summary"]["ok"])
+
+
 class QaManifestWiringTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

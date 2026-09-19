@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,20 @@ from .room_manifest import (
     build_room_manifest,
     render_manifest_block,
 )
+
+# #38: graceful-degradation warnings emitted by summarizer/task_extractor.
+STAGE_WARN_PATTERN = re.compile(
+    r"\[!warning\]\s*(Summary|Task suggestion) generation failed:\s*(.*)", re.MULTILINE
+)
+
+def _stage(error: str | None) -> dict[str, Any]:
+    """Normalize one pipeline stage into the {ok, error} contract shape."""
+    return {"ok": error is None, "error": error}
+
+def _warning_degradation(text: str) -> str | None:
+    """Extract 'X generation failed: …' from a graceful-degradation warning block."""
+    match = STAGE_WARN_PATTERN.search(text)
+    return f"{match.group(1)} generation failed: {match.group(2)}" if match else None
 
 def build_note_title(data: dict[str, Any], custom_title: str | None = None) -> str:
     """Generate a note title."""
@@ -123,6 +138,12 @@ def export_note(txt_path: Path, custom_title: str | None = None) -> dict[str, An
     )
     print(f"[EXPORT] Task suggestions generated ({len(task_suggestions)} chars)")
 
+    # #38: per-stage health for the outcome contract — degradation is not success.
+    stages: dict[str, dict[str, Any]] = {
+        "summary": _stage(_warning_degradation(summary)),
+        "tasks": _stage(_warning_degradation(task_suggestions)),
+    }
+
     # Canonical entity resolution: derived surfaces only, raw transcript untouched.
     vocabulary = load_vocabulary()
     summary, summary_corrections = resolve_derived_surfaces(summary, vocabulary)
@@ -135,6 +156,7 @@ def export_note(txt_path: Path, custom_title: str | None = None) -> dict[str, An
     print("[EXPORT] Extracting evidence-backed claims...")
     claims_result = extract_claims(data["segments"], data["transcript_text"])
     claims_block = render_claims_block(claims_result)
+    stages["claims"] = _stage(claims_result.get("error"))
     print(
         f"[EXPORT] Claims extracted ({len(claims_result['claims'])} verified, "
         f"{claims_result['dropped_unresolved']} dropped)"
@@ -184,6 +206,7 @@ def export_note(txt_path: Path, custom_title: str | None = None) -> dict[str, An
                 "model": LLM_MODEL,
             },
         )
+        stages["qa"] = _stage(verification.get("error"))
         qa_block = render_qa_block(verification)
         if verification.get("error"):
             print(f"[EXPORT] QA verification degraded: {verification['error']}")
@@ -206,6 +229,7 @@ def export_note(txt_path: Path, custom_title: str | None = None) -> dict[str, An
             note_path=str(out_path),
         )
         manifest_block = render_manifest_block(manifest)
+        stages["manifest"] = _stage(manifest.get("error"))
         print(f"[EXPORT] Room manifest lanes: {manifest['downstreamLanes']}")
 
     MEETINGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -285,8 +309,25 @@ def export_note(txt_path: Path, custom_title: str | None = None) -> dict[str, An
         # Prune artifacts list to only what actually exists on disk.
         artifacts = [a for a in artifacts if Path(a).exists()]
 
+    # #38: outcome is first-class — degradation is not a plain success, and a
+    # hard failure anywhere flips both outcome and success (rc!=0) even though
+    # the note itself was written gracefully. A failed summary is a failed
+    # export: the note's core deliverable is the summary.
+    stage_errors = [f"{name}: {stage['error']}" for name, stage in stages.items() if not stage["ok"]]
+    outcome = "ok" if not stage_errors else "degraded"
+    success = not artifacts_failed
+    if artifacts_failed:
+        outcome = "failed"
+        stage_errors.append("artifacts: artifact write failed")
+    elif not stages["summary"]["ok"] or (stage_errors and len(stage_errors) == len(stages)):
+        outcome = "failed"
+        success = False
+
     return {
-        "success": not artifacts_failed,
+        "success": success,
+        "outcome": outcome,
+        "stages": stages,
+        "errors": stage_errors,
         "path": str(out_path),
         "filename": filename,
         "transcript_lines": data["line_count"],

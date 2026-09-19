@@ -232,6 +232,69 @@ class AutoExportTests(unittest.TestCase):
                 meetcap.auto_export("/tmp/does-not-matter.txt")
 
 
+class AutoExportOutcomeTests(unittest.TestCase):
+    """#38: exit 0 alone is not success — stage errors in the export payload
+    must surface in the notification instead of a false ✅."""
+
+    @staticmethod
+    def _payload(outcome="ok", stages=None):
+        return json.dumps({
+            "success": outcome != "failed",
+            "outcome": outcome,
+            "stages": stages or {},
+        })
+
+    def _run(self, returncode=0, stdout="", stderr=""):
+        proc = subprocess.CompletedProcess(
+            args=["export"], returncode=returncode, stdout=stdout, stderr=stderr
+        )
+        with patch("meetcap.notify") as notify, patch("meetcap.subprocess.run", return_value=proc):
+            meetcap.auto_export("/tmp/whatever.txt")
+        return notify
+
+    def test_stage_errors_surface_despite_exit_zero(self):
+        stdout = (
+            "[EXPORT] Generating AI summary...\n"
+            "[EXPORT] Saved to /vault/Meetings/x.md\n"
+            + self._payload(
+                outcome="failed",
+                stages={
+                    "summary": {"ok": False, "error": "summary generation failed: no API key"},
+                    "tasks": {"ok": True, "error": None},
+                },
+            )
+        )
+        notify = self._run(stdout=stdout)
+        everything = " ".join(str(call.args) for call in notify.call_args_list)
+        self.assertNotIn("✅", everything)
+        self.assertIn("⚠️", everything)
+        self.assertIn("summary generation failed", everything)
+
+    def test_clean_payload_keeps_success_notification(self):
+        stdout = "[EXPORT] Saved\n" + self._payload(outcome="ok", stages={
+            "summary": {"ok": True, "error": None},
+            "tasks": {"ok": True, "error": None},
+        })
+        notify = self._run(stdout=stdout)
+        self.assertTrue(any("✅" in str(call.args) for call in notify.call_args_list))
+
+    def test_non_json_stdout_falls_back_to_exit_code(self):
+        notify = self._run(stdout="[EXPORT] Saved\nno json here")
+        self.assertTrue(any("✅" in str(call.args) for call in notify.call_args_list))
+
+    def test_json_tail_extraction(self):
+        stdout = "[EXPORT] a\n[EXPORT] b\n" + self._payload(
+            outcome="degraded",
+            stages={
+                "summary": {"ok": True, "error": None},
+                "tasks": {"ok": False, "error": "task suggestion generation failed: timeout"},
+            },
+        )
+        parsed = meetcap._parse_export_result(stdout)
+        self.assertEqual(parsed["outcome"], "degraded")
+        self.assertIn("timeout", parsed["stages"]["tasks"]["error"])
+
+
 class SingleInstanceTests(unittest.TestCase):
     def test_acquire_single_instance_no_socket(self):
         with tempfile.TemporaryDirectory() as tmp:

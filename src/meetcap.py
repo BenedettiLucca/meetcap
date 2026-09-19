@@ -463,6 +463,24 @@ def do_transcribe_last():
             save_state()
 
 
+def _parse_export_result(stdout: str) -> dict | None:
+    """#38: extract the trailing JSON result object from export_to_vault stdout.
+
+    The CLI prints [EXPORT] progress lines before the final JSON blob; walk the
+    brace positions until one parses into the result contract.
+    """
+    for index, char in enumerate(stdout):
+        if char != "{":
+            continue
+        try:
+            parsed = json.loads(stdout[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and ("success" in parsed or "outcome" in parsed):
+            return parsed
+    return None
+
+
 def auto_export(txt_path: str):
     """Run export_to_vault.py in a subprocess after transcription."""
     try:
@@ -474,11 +492,36 @@ def auto_export(txt_path: str):
             cwd=str(BASE_DIR),
         )
         if result.returncode == 0:
-            print(f"[EXPORT] Success: {result.stdout.strip()}")
-            notify("Meetcap", "✅ Exported to vault", "Check your Meetings folder")
+            payload = _parse_export_result(result.stdout) or {}
+            stages = payload.get("stages") or {}
+            # #38: exit 0 with failed stages is not a ✅. Stages are the
+            # source of truth; "errors" and outcome/success are fallbacks.
+            failed_stages = [
+                f"{name}: {stage.get('error') or 'failed'}"
+                for name, stage in stages.items()
+                if isinstance(stage, dict) and not stage.get("ok", True)
+            ]
+            if not failed_stages:
+                failed_stages = [e for e in payload.get("errors", []) if e]
+            if payload.get("outcome") == "failed" and not failed_stages:
+                failed_stages = ["export outcome: failed"]
+            if payload.get("success") is False and not failed_stages:
+                failed_stages = ["export reported failure"]
+            if failed_stages:
+                detail = "; ".join(failed_stages)[:180]
+                print(f"[EXPORT] Degraded: {detail}")
+                notify("Meetcap", "⚠️ Export degraded", detail)
+            else:
+                print(f"[EXPORT] Success: {result.stdout.strip()}")
+                notify("Meetcap", "✅ Exported to vault", "Check your Meetings folder")
         else:
-            print(f"[EXPORT] Failed: {result.stderr.strip()}")
-            notify("Meetcap", "⚠️ Export failed", result.stderr.strip()[:100])
+            # rc!=0: surface stage errors from stdout when stderr is empty.
+            payload = _parse_export_result(result.stdout)
+            detail = result.stderr.strip()[:100]
+            if not detail and payload:
+                detail = "; ".join(e for e in payload.get("errors", []) if e)[:100]
+            print(f"[EXPORT] Failed: {detail or f'exit {result.returncode}'}")
+            notify("Meetcap", "⚠️ Export failed", detail or f"exit {result.returncode}")
     except (OSError, subprocess.SubprocessError) as e:
         print(f"[EXPORT] Error: {e}")
         notify("Meetcap", "⚠️ Export error", str(e)[:100])
