@@ -22,6 +22,7 @@ from pathlib import Path
 import doctor
 import runtime_paths
 from runtime_paths import pid_is_meetcap
+import transcript_segments
 
 # ── Config ──────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -314,10 +315,7 @@ def transcribe_via_router(wav_path):
         "---",
         "",
     ]
-    for seg in result.get("segments", []):
-        start = format_timestamp(seg["start"])
-        end = format_timestamp(seg["end"])
-        lines.append(f"[{start} → {end}] {seg['text'].strip()}")
+    lines.extend(transcript_segments.format_transcript_lines(result.get("segments", [])))
     transcript = "\n".join(lines)
     txt_path = wav_path.with_suffix(".txt")
     tmp_path = wav_path.with_suffix(".tmp")
@@ -354,10 +352,10 @@ def transcribe(wav_path):
                 "",
             ]
 
-            for seg in segments:
-                start = format_timestamp(seg.start)
-                end = format_timestamp(seg.end)
-                lines.append(f"[{start} → {end}] {seg.text.strip()}")
+            seg_dicts = [
+                {"start": s.start, "end": s.end, "text": s.text} for s in segments
+            ]
+            lines.extend(transcript_segments.format_transcript_lines(seg_dicts))
 
             transcript = "\n".join(lines)
             txt_path = wav_path.with_suffix(".txt")
