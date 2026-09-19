@@ -33,6 +33,69 @@ def quote_head(text: str, words: int) -> str:
     return " ".join(text.split()[:words])
 
 
+def resolve_claim_grounding(
+    quote: str,
+    segments: list[dict[str, Any]],
+    *,
+    max_timestamps: int = CLAIMS_MAX_TIMESTAMPS,
+) -> dict[str, Any]:
+    """Resolve timestamps and grounding level for a quote against segments.
+
+    Grounding levels:
+    - 'exact': exact normalized quote or quote head (>= 3 words) substring match.
+    - 'fuzzy': fallback SequenceMatcher ratio >= 0.6 against quote head.
+    - None: unresolvable (dropped).
+    """
+    if not quote or not segments:
+        return {"timestamps": [], "match_method": None}
+
+    normalized_quote = normalize_for_match(quote)
+    head_quote = normalize_for_match(quote_head(quote, CLAIMS_QUOTE_HEAD_WORDS))
+    if not normalized_quote:
+        return {"timestamps": [], "match_method": None}
+
+    quote_words = normalized_quote.split()
+    exact_matches: list[int] = []
+    fuzzy_matches: list[tuple[int, float]] = []
+
+    for segment in segments:
+        segment_text = normalize_for_match(segment.get("text", ""))
+        if not segment_text:
+            continue
+        is_exact = normalized_quote in segment_text
+        if not is_exact and len(quote_words) >= 3:
+            for n in range(min(len(quote_words), CLAIMS_QUOTE_HEAD_WORDS), 2, -1):
+                if " ".join(quote_words[:n]) in segment_text:
+                    is_exact = True
+                    break
+
+        if is_exact:
+            exact_matches.append(segment["index"])
+        else:
+            ratio = SequenceMatcher(None, head_quote, segment_text).ratio()
+            if ratio >= 0.6:
+                fuzzy_matches.append((segment["index"], ratio))
+
+    if exact_matches:
+        matched_indexes = exact_matches[:max_timestamps]
+        matched_indexes.sort()
+        return {
+            "timestamps": [segments[index]["start"] for index in matched_indexes],
+            "match_method": "exact",
+        }
+
+    if fuzzy_matches:
+        fuzzy_matches.sort(key=lambda item: (-item[1], item[0]))
+        matched_indexes = [index for index, _ in fuzzy_matches[:max_timestamps]]
+        matched_indexes.sort()
+        return {
+            "timestamps": [segments[index]["start"] for index in matched_indexes],
+            "match_method": "fuzzy",
+        }
+
+    return {"timestamps": [], "match_method": None}
+
+
 def resolve_claim_timestamps(
     quote: str,
     segments: list[dict[str, Any]],
@@ -41,36 +104,13 @@ def resolve_claim_timestamps(
 ) -> list[str]:
     """Locate the transcript segment timestamps that back a verbatim quote.
 
-    Strategy: substring match of the normalized quote (or its head words)
-    against each segment; falls back to similarity ratio. Returns segment
-    start timestamps in transcript order.
+    Only exact/substring matches produce verified timestamps; fallback fuzzy
+    matches (ratio >= 0.6) are not verified timestamps (#23).
     """
-    if not quote or not segments:
-        return []
-
-    normalized_quote = normalize_for_match(quote)
-    head_quote = normalize_for_match(quote_head(quote, CLAIMS_QUOTE_HEAD_WORDS))
-    if not normalized_quote:
-        return []
-
-    matches: list[tuple[int, float]] = []
-    for segment in segments:
-        segment_text = normalize_for_match(segment["text"])
-        if not segment_text:
-            continue
-        if normalized_quote in segment_text or (
-            head_quote and len(head_quote.split()) >= 3 and head_quote in segment_text
-        ):
-            matches.append((segment["index"], 1.0))
-        else:
-            ratio = SequenceMatcher(None, head_quote, segment_text).ratio()
-            if ratio >= 0.6:
-                matches.append((segment["index"], ratio))
-
-    matches.sort(key=lambda item: (-item[1], item[0]))
-    matched_indexes = [index for index, _ in matches[:max_timestamps]]
-    matched_indexes.sort()
-    return [segments[index]["start"] for index in matched_indexes]
+    grounding = resolve_claim_grounding(quote, segments, max_timestamps=max_timestamps)
+    if grounding["match_method"] == "exact":
+        return grounding["timestamps"]
+    return []
 
 
 def normalize_claims_payload(payload: Any) -> list[dict[str, str]]:
@@ -170,11 +210,16 @@ def extract_claims(
     verified: list[dict[str, Any]] = []
     dropped = 0
     for claim in normalize_claims_payload(payload):
-        timestamps = resolve_claim_timestamps(claim["quote_excerpt"], segments)
-        if not timestamps:
+        grounding = resolve_claim_grounding(claim["quote_excerpt"], segments)
+        if not grounding["match_method"]:
             dropped += 1
             continue
-        verified.append({**claim, "timestamps": timestamps, "speakers": None})
+        verified.append({
+            **claim,
+            "timestamps": grounding["timestamps"],
+            "match_method": grounding["match_method"],
+            "speakers": None,
+        })
 
     result["claims"] = verified
     result["dropped_unresolved"] = dropped
@@ -198,11 +243,16 @@ def render_claims_block(claims_result: dict[str, Any]) -> str:
 
     for claim in claims:
         timestamps = ", ".join(claim.get("timestamps", []))
+        match_method = claim.get("match_method", "exact")
+        if match_method == "fuzzy":
+            evidence = f"{timestamps} (fuzzy, unverified)" if timestamps else "unverified"
+        else:
+            evidence = timestamps or "unverified"
         lines.extend([
             "",
             f"- **Claim:** {claim['claim']}",
             f"  - Why it matters: {claim.get('why_it_matters') or '—'}",
-            f"  - Evidence: {timestamps}",
+            f"  - Evidence: {evidence}",
             f"  - Confidence: {claim.get('confidence', 'medium')}",
         ])
 

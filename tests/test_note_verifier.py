@@ -93,7 +93,7 @@ class VerifyExportTests(unittest.TestCase):
         self.assertEqual(result["decision_gaps"], ["budget owner not captured (at 00:12)"])
         self.assertEqual(len(result["unsupported_claims"]), 1)
 
-    def test_action_gaps_alone_do_not_trigger_review(self):
+    def test_action_gaps_alone_trigger_review(self):
         payload = (
             '{"coverage_score": 0.9, "decision_gaps": [], '
             '"action_item_gaps": ["missing deadline"], '
@@ -102,8 +102,46 @@ class VerifyExportTests(unittest.TestCase):
         )
         with patch.object(note_verifier, "call_openrouter", return_value=payload):
             result = verify_export(SEGMENTS, "note", "tasks")
-        self.assertFalse(result["needs_human_review"])
+        self.assertTrue(result["needs_human_review"])
         self.assertEqual(result["action_item_gaps"], ["missing deadline"])
+        block = render_qa_block(result)
+        self.assertIn("## 🚩 QA Flags", block)
+        self.assertIn("Action item gaps: 1", block)
+        self.assertIn("Needs review: yes", block)
+
+    def test_chunked_verification_audits_full_transcript_with_weighted_coverage_and_gap_union(self):
+        segments = []
+        for i in range(20):
+            segments.append({
+                "index": i,
+                "start": f"{i:02d}:00",
+                "end": f"{i:02d}:30",
+                "text": f"segment content line {i} " + ("word " * 250),
+            })
+        chunk1_payload = (
+            '{"coverage_score": 0.9, '
+            '"decision_gaps": [{"item": "early budget gap", "timestamps": ["00:00"]}], '
+            '"action_item_gaps": [], "speaker_attribution_risks": [], '
+            '"unsupported_claims": [], "recommended_note_additions": []}'
+        )
+        chunk2_payload = (
+            '{"coverage_score": 0.5, '
+            '"decision_gaps": [{"item": "late architecture gap", "timestamps": ["15:00"]}], '
+            '"action_item_gaps": ["late action item"], "speaker_attribution_risks": [], '
+            '"unsupported_claims": [], "recommended_note_additions": []}'
+        )
+        with patch.object(note_verifier, "call_openrouter", side_effect=[chunk1_payload, chunk2_payload]) as mock_call:
+            result = verify_export(segments, "note", "tasks")
+
+        self.assertEqual(mock_call.call_count, 2)
+        self.assertIsNone(result["error"])
+        self.assertIsNotNone(result["coverage_score"])
+        self.assertTrue(0.5 < result["coverage_score"] < 0.9)
+        gap_items = " ".join(result["decision_gaps"])
+        self.assertIn("early budget gap", gap_items)
+        self.assertIn("late architecture gap", gap_items)
+        self.assertIn("late action item", result["action_item_gaps"])
+        self.assertTrue(result["needs_human_review"])
 
     def test_llm_failure_is_nonfatal(self):
         with patch.object(

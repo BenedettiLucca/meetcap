@@ -64,6 +64,10 @@ class ResolveTimestampsTests(unittest.TestCase):
         self.assertEqual(resolve_claim_timestamps("", SEGMENTS), [])
         self.assertEqual(resolve_claim_timestamps("some quote", []), [])
 
+    def test_fuzzy_fallback_not_returned_as_verified_timestamp(self):
+        stamps = resolve_claim_timestamps("we agreed shipping payment rail by friday", SEGMENTS)
+        self.assertEqual(stamps, [])
+
 
 class NormalizePayloadTests(unittest.TestCase):
     def test_valid_payload_preserved(self):
@@ -134,6 +138,23 @@ class ExtractClaimsTests(unittest.TestCase):
         self.assertIsNone(result["error"])
         self.assertEqual(len(result["claims"]), 3)
 
+    def test_grounding_levels_exact_and_fuzzy(self):
+        payload = (
+            '{"claims": ['
+            '{"claim": "Ship rail", "quote_excerpt": "ship the new payment rail by friday"}, '
+            '{"claim": "Ship rail paraphrased", "quote_excerpt": "we agreed shipping payment rail by friday"}'
+            ']}'
+        )
+        with patch.object(claim_extractor, "call_openrouter", return_value=payload):
+            result = extract_claims(SEGMENTS, "transcript text")
+        self.assertEqual(len(result["claims"]), 2)
+        exact_claim = result["claims"][0]
+        fuzzy_claim = result["claims"][1]
+        self.assertEqual(exact_claim["match_method"], "exact")
+        self.assertEqual(exact_claim["timestamps"], ["00:02"])
+        self.assertEqual(fuzzy_claim["match_method"], "fuzzy")
+        self.assertEqual(fuzzy_claim["timestamps"], ["00:02"])
+
 
 class RenderClaimsBlockTests(unittest.TestCase):
     def test_renders_claims_with_timestamps(self):
@@ -158,6 +179,24 @@ class RenderClaimsBlockTests(unittest.TestCase):
         block = render_claims_block({"claims": [], "dropped_unresolved": 0, "error": None})
         self.assertIn("No evidence-backed claims", block)
 
+    def test_fuzzy_quote_never_presents_verbatim_verified_timestamp(self):
+        result = {
+            "claims": [{
+                "claim": "Ship it",
+                "why_it_matters": "deadline",
+                "timestamps": ["00:02"],
+                "match_method": "fuzzy",
+                "confidence": "high",
+                "speakers": None,
+            }],
+            "dropped_unresolved": 0,
+            "error": None,
+        }
+        block = render_claims_block(result)
+        self.assertIn("## 🔎 Claims & Evidence", block)
+        self.assertNotIn("Evidence: 00:02\n", block)
+        self.assertIn("Evidence: 00:02 (fuzzy, unverified)", block)
+
 
 class EvidenceArtifactTests(unittest.TestCase):
     def test_artifact_shape(self):
@@ -168,6 +207,21 @@ class EvidenceArtifactTests(unittest.TestCase):
         self.assertEqual(artifact["schema"], "meetcap.evidence/1")
         self.assertEqual(artifact["meeting_date"], "2026-08-14")
         self.assertEqual(artifact["dropped_unresolved"], 2)
+
+    def test_evidence_artifact_records_match_method(self):
+        claims_result = {
+            "claims": [
+                {"claim": "Exact", "timestamps": ["00:02"], "match_method": "exact"},
+                {"claim": "Fuzzy", "timestamps": ["00:02"], "match_method": "fuzzy"},
+            ],
+            "dropped_unresolved": 0,
+            "error": None,
+        }
+        artifact = build_evidence_artifact(
+            claims_result, meeting_date="2026-08-14", transcript_file="m.wav", model="m"
+        )
+        self.assertEqual(artifact["claims"][0]["match_method"], "exact")
+        self.assertEqual(artifact["claims"][1]["match_method"], "fuzzy")
 
 
 if __name__ == "__main__":

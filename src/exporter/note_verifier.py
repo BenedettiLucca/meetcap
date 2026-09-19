@@ -15,7 +15,7 @@ from .prompts import (
     VERIFICATION_USER_PROMPT,
 )
 from .llm_client import call_openrouter, should_retry_without_structured_output
-from .transcript_parser import truncate_text
+from .transcript_parser import split_transcript_into_chunks, truncate_text
 
 _FLAG_KEYS = (
     "decision_gaps",
@@ -185,19 +185,39 @@ def _format_timestamps(segments: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _union_raw_items(payloads: list[dict[str, Any]], key: str) -> list[Any]:
+    seen = set()
+    result = []
+    for payload in payloads:
+        raw = payload.get(key, [])
+        if not isinstance(raw, list):
+            continue
+        for item in raw:
+            item_text = _item_to_text(item)
+            if item_text and item_text not in seen:
+                seen.add(item_text)
+                result.append(item)
+    return result
+
+
 def _request_verification(
-    segments: list[dict[str, Any]],
+    transcript: list[dict[str, Any]] | str,
     exported_note: str,
     task_suggestions: str,
     context: dict[str, Any],
 ) -> str:
+    transcript_text = (
+        _format_timestamps(transcript)
+        if isinstance(transcript, list)
+        else str(transcript)
+    )
     messages = [
         {"role": "system", "content": VERIFICATION_SYSTEM_PROMPT},
         {
             "role": "user",
             "content": VERIFICATION_USER_PROMPT.format(
                 transcript=truncate_text(
-                    _format_timestamps(segments),
+                    transcript_text,
                     max_chars=QA_TRANSCRIPT_MAX_CHARS,
                     head_chars=18000,
                     tail_chars=5000,
@@ -261,27 +281,67 @@ def verify_export(
         result["error"] = "no timestamped segments in transcript"
         return result
 
-    try:
-        response_text = _request_verification(
-            segments, exported_note, task_suggestions, context or {}
-        )
-        try:
-            payload = json.loads(response_text)
-        except json.JSONDecodeError:
-            match = re.search(r"\{.*\}", response_text, re.DOTALL)
-            if not match:
-                raise
-            payload = json.loads(match.group(0))
-    except Exception as exc:
-        result["error"] = f"verification failed: {exc}"
-        return result
+    formatted_transcript = _format_timestamps(segments)
+    chunks = split_transcript_into_chunks(formatted_transcript, max_chars=QA_TRANSCRIPT_MAX_CHARS)
 
-    result.update(normalize_verification_payload(payload, segments))
+    chunk_payloads: list[dict[str, Any]] = []
+    chunk_lengths: list[int] = []
+
+    for chunk in chunks:
+        try:
+            response_text = _request_verification(
+                chunk, exported_note, task_suggestions, context or {}
+            )
+            try:
+                payload = json.loads(response_text)
+            except json.JSONDecodeError:
+                match = re.search(r"\{.*\}", response_text, re.DOTALL)
+                if not match:
+                    raise
+                payload = json.loads(match.group(0))
+            chunk_payloads.append(payload if isinstance(payload, dict) else {})
+            chunk_lengths.append(len(chunk))
+        except Exception as exc:
+            result["error"] = f"verification failed: {exc}"
+            return result
+
+    # Deterministic aggregation (#20):
+    # Coverage: weighted average by character count
+    total_weight = 0
+    weighted_sum = 0.0
+    has_valid_coverage = False
+    for p, length in zip(chunk_payloads, chunk_lengths):
+        try:
+            cov = float(p.get("coverage_score"))
+            cov = min(1.0, max(0.0, cov))
+            weighted_sum += cov * length
+            total_weight += length
+            has_valid_coverage = True
+        except (TypeError, ValueError):
+            pass
+
+    if has_valid_coverage and total_weight > 0:
+        coverage_score = round(weighted_sum / total_weight, 2)
+    else:
+        coverage_score = None
+
+    # Gaps: union across all chunks
+    aggregated_payload = {
+        "coverage_score": coverage_score,
+        "decision_gaps": _union_raw_items(chunk_payloads, "decision_gaps"),
+        "action_item_gaps": _union_raw_items(chunk_payloads, "action_item_gaps"),
+        "speaker_attribution_risks": _union_raw_items(chunk_payloads, "speaker_attribution_risks"),
+        "unsupported_claims": _union_raw_items(chunk_payloads, "unsupported_claims"),
+        "recommended_note_additions": _union_raw_items(chunk_payloads, "recommended_note_additions"),
+    }
+
+    result.update(normalize_verification_payload(aggregated_payload, segments))
     coverage = result["coverage_score"]
     below_threshold = coverage is not None and coverage < QA_COVERAGE_THRESHOLD
     result["needs_human_review"] = bool(
         below_threshold
         or result["decision_gaps"]
+        or result["action_item_gaps"]
         or result["speaker_attribution_risks"]
         or result["unsupported_claims"]
     )
