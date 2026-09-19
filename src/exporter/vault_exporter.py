@@ -71,6 +71,40 @@ def build_note_title(data: dict[str, Any], custom_title: str | None = None) -> s
         return custom_title
     return f"Meeting — {data['meeting_date']} ({data['duration_str']})"
 
+def safe_name(name: str, max_length: int = 100) -> str:
+    """Robust filename sanitization (#40).
+
+    Replaces / and : with -, strips control chars and newlines,
+    collapses whitespace, strips edge whitespace/dots, and truncates
+    to ~100 characters while stripping trailing dots/whitespace.
+    Falls back to 'untitled' if empty.
+    """
+    cleaned = name.replace("/", "-").replace(":", "-")
+    cleaned = re.sub(r"[\x00-\x1f\x7f-\x9f]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = cleaned.strip(". ")
+    if len(cleaned) > max_length:
+        cleaned = cleaned[:max_length].rstrip(". ")
+    return cleaned or "untitled"
+
+def _format_yaml_scalar(key: str, val: Any) -> str:
+    """Format a single YAML frontmatter scalar with deterministic escaping (#40)."""
+    if val is None:
+        return "null"
+    if isinstance(val, bool):
+        return "true" if val else "false"
+    if isinstance(val, int):
+        return str(val)
+    if isinstance(val, float):
+        return str(val)
+    if key == "date" and isinstance(val, str) and re.match(r"^\d{4}-\d{2}-\d{2}$", val):
+        return val
+    if key == "tags" and isinstance(val, list):
+        return f"[{', '.join(str(t) for t in val)}]"
+    if isinstance(val, list):
+        return f"[{', '.join(_format_yaml_scalar('', item) for item in val)}]"
+    return json.dumps(str(val), ensure_ascii=False)
+
 def build_note_content(
     *,
     data: dict[str, Any],
@@ -81,6 +115,11 @@ def build_note_content(
     corrections_block: str = "",
     qa_block: str = "",
     manifest_block: str = "",
+    qa_needs_review: bool = False,
+    qa_coverage_score: float | None = None,
+    outcome: str = "ok",
+    qa_audited: str = "post-entity-resolution",
+    entity_corrections_count: int = 0,
     now: datetime | None = None,
 ) -> str:
     """Render the final Obsidian note content."""
@@ -92,15 +131,28 @@ def build_note_content(
     qa_section = f"\n{qa_block}\n\n---\n" if qa_block else ""
     manifest_section = f"\n{manifest_block}\n\n---\n" if manifest_block else ""
 
+    frontmatter_fields: dict[str, Any] = {
+        "title": title,
+        "date": data["meeting_date"],
+        "time": data["meeting_time"],
+        "duration": data["duration_str"],
+        "tags": ["meeting", "meeting-notes", "meetcap"],
+        "model": meta.get("model", "unknown"),
+        "language": meta.get("language", "unknown"),
+        "created": now.strftime("%Y-%m-%d %H:%M"),
+        "qa_needs_review": qa_needs_review,
+        "qa_coverage_score": qa_coverage_score,
+        "outcome": outcome,
+        "qa_audited": qa_audited,
+        "entity_corrections_count": entity_corrections_count,
+    }
+    frontmatter_lines = [
+        f"{k}: {_format_yaml_scalar(k, v)}" for k, v in frontmatter_fields.items()
+    ]
+    frontmatter_yaml = "\n".join(frontmatter_lines)
+
     return f"""---
-title: "{title}"
-date: {data['meeting_date']}
-time: {data['meeting_time']}
-duration: "{data['duration_str']}"
-tags: [meeting, meeting-notes, meetcap]
-model: "{meta.get('model', 'unknown')}"
-language: "{meta.get('language', 'unknown')}"
-created: "{now.strftime('%Y-%m-%d %H:%M')}"
+{frontmatter_yaml}
 ---
 
 # {title}
@@ -178,18 +230,19 @@ def export_note(txt_path: Path, custom_title: str | None = None) -> dict[str, An
     )
 
     title = build_note_title(data, custom_title)
-    safe_name = title.replace("/", "-").replace(":", "-")
-    filename = f"{safe_name}.md"
+    safe_base = safe_name(title)
+    filename = f"{safe_base}.md"
     out_path = MEETINGS_DIR / filename
 
     # #12 no-clobber: if note already exists, find first free collision suffix (-a, -b, …).
     if out_path.exists():
         for suffix_char in "abcdefghijklmnopqrstuvwxyz":
-            candidate_name = f"{safe_name}-{suffix_char}"
-            candidate_path = MEETINGS_DIR / f"{candidate_name}.md"
+            prefix = safe_base[:97] if len(safe_base) > 97 else safe_base
+            candidate_base = f"{prefix.rstrip('. ')}-{suffix_char}"
+            candidate_path = MEETINGS_DIR / f"{candidate_base}.md"
             if not candidate_path.exists():
-                safe_name = candidate_name
-                filename = f"{safe_name}.md"
+                safe_base = candidate_base
+                filename = f"{safe_base}.md"
                 out_path = candidate_path
                 break
         else:
@@ -247,6 +300,12 @@ def export_note(txt_path: Path, custom_title: str | None = None) -> dict[str, An
         stages["manifest"] = _stage(manifest.get("error"))
         print(f"[EXPORT] Room manifest lanes: {manifest['downstreamLanes']}")
 
+    # Determine outcome of stages prior to note write for frontmatter (#51)
+    stage_errors = [f"{name}: {stage['error']}" for name, stage in stages.items() if not stage["ok"]]
+    pre_outcome = "ok" if not stage_errors else "degraded"
+    if not stages["summary"]["ok"] or (stage_errors and len(stage_errors) == len(stages)):
+        pre_outcome = "failed"
+
     MEETINGS_DIR.mkdir(parents=True, exist_ok=True)
     content = build_note_content(
         data=data,
@@ -257,13 +316,18 @@ def export_note(txt_path: Path, custom_title: str | None = None) -> dict[str, An
         corrections_block=corrections_block,
         qa_block=qa_block,
         manifest_block=manifest_block,
+        qa_needs_review=verification.get("needs_human_review", False),
+        qa_coverage_score=verification.get("coverage_score"),
+        outcome=pre_outcome,
+        qa_audited="post-entity-resolution",
+        entity_corrections_count=len(corrections),
     )
 
     # #17 atomic commit protocol: stage → validate → os.replace. Failures never
     # leave truncated files or staging litter; required artifacts (evidence,
     # corrections) failing flips outcome to failed, optional ones (QA/manifest)
     # degrade through the stages contract (#38).
-    artifact_dir = ARTIFACTS_DIR / safe_name
+    artifact_dir = ARTIFACTS_DIR / safe_base
     commit_errors: list[str] = []    # required artifact failures
     optional_errors: list[str] = []  # optional artifact failures
     artifacts: list[str] = []
