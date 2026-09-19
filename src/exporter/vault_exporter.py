@@ -34,6 +34,7 @@ from .note_verifier import (
 from .room_manifest import (
     build_room_manifest,
     render_manifest_block,
+    render_decisions_block,
 )
 
 # #38: graceful-degradation warnings emitted by summarizer/task_extractor.
@@ -115,6 +116,7 @@ def build_note_content(
     corrections_block: str = "",
     qa_block: str = "",
     manifest_block: str = "",
+    decisions_block: str = "",
     qa_needs_review: bool = False,
     qa_coverage_score: float | None = None,
     outcome: str = "ok",
@@ -126,6 +128,7 @@ def build_note_content(
     meta = data["meta"]
     now = now or datetime.now(BRT)
 
+    decisions_section = f"\n{decisions_block}\n\n---\n" if decisions_block else ""
     claims_section = f"\n{claims_block}\n\n---\n" if claims_block else ""
     corrections_section = f"\n{corrections_block}\n\n---\n" if corrections_block else ""
     qa_section = f"\n{qa_block}\n\n---\n" if qa_block else ""
@@ -172,7 +175,7 @@ def build_note_content(
 {task_suggestions}
 
 ---
-{claims_section}{corrections_section}{qa_section}{manifest_section}
+{decisions_section}{claims_section}{corrections_section}{qa_section}{manifest_section}
 ## 📝 Transcrição Completa
 
 {data['transcript_text']}
@@ -273,6 +276,7 @@ def export_note(txt_path: Path, custom_title: str | None = None) -> dict[str, An
     manifest: dict[str, Any] | None = None
     qa_block = ""
     manifest_block = ""
+    decisions_block = ""
 
     if EXPORT_QA_ENABLED:
         print("[EXPORT] Running QA verification pass...")
@@ -312,6 +316,7 @@ def export_note(txt_path: Path, custom_title: str | None = None) -> dict[str, An
             note_path=str(out_path),
         )
         manifest_block = render_manifest_block(manifest)
+        decisions_block = render_decisions_block(manifest, segments=data["segments"])
         stages["manifest"] = _stage(manifest.get("error"))
         print(f"[EXPORT] Room manifest lanes: {manifest['downstreamLanes']}")
 
@@ -331,6 +336,7 @@ def export_note(txt_path: Path, custom_title: str | None = None) -> dict[str, An
         corrections_block=corrections_block,
         qa_block=qa_block,
         manifest_block=manifest_block,
+        decisions_block=decisions_block,
         qa_needs_review=verification.get("needs_human_review", False),
         qa_coverage_score=verification.get("coverage_score"),
         outcome=pre_outcome,

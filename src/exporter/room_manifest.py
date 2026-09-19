@@ -1,6 +1,7 @@
 import json
 import re
 from datetime import date
+from difflib import SequenceMatcher
 from typing import Any
 
 from .config import (
@@ -15,6 +16,8 @@ from .prompts import (
 )
 from .llm_client import call_openrouter, should_retry_without_structured_output
 from .transcript_parser import truncate_text
+from .note_verifier import _parse_timestamp, _ground_timestamps
+from .claim_extractor import normalize_for_match
 
 AUTHORITY_MIXES = ("decision-heavy", "discussion-heavy", "mixed")
 FRESHNESS_VALUES = ("same-day", "aging", "stale-follow-up", "unknown")
@@ -61,20 +64,24 @@ def extract_actions(*texts: str) -> list[str]:
 
 def suggest_downstream_lanes(
     *,
-    decisions: list[str],
+    decisions: list[Any],
     actions: list[str],
     high_confidence_claims: int,
     client_followup: bool,
     coverage_ok: bool,
 ) -> list[str]:
     """Heuristic routing. Low-confidence material routes to reference-only."""
-    if not coverage_ok and not decisions:
+    has_decisions = any(
+        d.get("status") != "unresolved" if isinstance(d, dict) else bool(d)
+        for d in decisions
+    )
+    if not coverage_ok and not has_decisions:
         return ["reference-only"]
 
     lanes: list[str] = []
     if actions:
         lanes.append("daily-tasks")
-    if decisions:
+    if has_decisions:
         lanes.append("wiki")
     if high_confidence_claims > 0:
         lanes.append("content")
@@ -102,6 +109,20 @@ def normalize_manifest_payload(payload: Any) -> dict[str, Any]:
         items = [text for text in (" ".join(str(i).split()) for i in raw) if text]
         return items[:MANIFEST_MAX_ITEMS]
 
+    def _decisions(key: str) -> list[Any]:
+        raw = source.get(key, [])
+        if not isinstance(raw, list):
+            return []
+        items = []
+        for i in raw:
+            if isinstance(i, dict):
+                items.append(i)
+            elif i is not None:
+                text = " ".join(str(i).split())
+                if text:
+                    items.append(text)
+        return items[:MANIFEST_MAX_ITEMS]
+
     followup = source.get("suggestsClientFollowup", False)
     if isinstance(followup, str):
         followup = followup.strip().lower() in ("true", "yes", "1")
@@ -110,7 +131,7 @@ def normalize_manifest_payload(payload: Any) -> dict[str, Any]:
 
     return {
         "authorityMix": authority,
-        "decisions": _strings("decisions"),
+        "decisions": _decisions("decisions"),
         "openQuestions": _strings("openQuestions"),
         "suggestsClientFollowup": followup,
     }
@@ -169,6 +190,123 @@ def _request_classification(
             reasoning_effort="none",
             response_format=None,
         )
+
+
+_STOPWORDS = {
+    "the", "a", "an", "to", "of", "and", "in", "for", "on", "with", "is", "was",
+    "we", "it", "that", "this", "our", "will", "by", "at", "as", "be", "from",
+    "are", "were", "been", "have", "has", "had", "do", "does", "did", "not",
+}
+
+
+def _is_present_in_transcript(text: str, segments: list[dict[str, Any]]) -> bool:
+    """Check if decision text has a verifiable textual trace in the transcript segments."""
+    if not text or not segments:
+        return False
+    norm_text = normalize_for_match(text)
+    if not norm_text:
+        return False
+
+    full_transcript = " ".join(normalize_for_match(seg.get("text", "")) for seg in segments)
+    if norm_text in full_transcript:
+        return True
+
+    text_words = norm_text.split()
+    sig_words = [w for w in text_words if len(w) >= 3 and w not in _STOPWORDS]
+
+    for seg in segments:
+        seg_text = normalize_for_match(seg.get("text", ""))
+        if not seg_text:
+            continue
+        if norm_text in seg_text:
+            return True
+        if seg_text in norm_text and len(seg_text.split()) >= 3:
+            return True
+        if sig_words:
+            matched = [w for w in sig_words if w in seg_text]
+            if len(sig_words) <= 2 and len(matched) == len(sig_words):
+                return True
+            if len(sig_words) > 2 and len(matched) / len(sig_words) >= 0.7:
+                return True
+        if len(text_words) >= 3 and SequenceMatcher(None, norm_text, seg_text).ratio() >= 0.6:
+            return True
+
+    return False
+
+
+def ground_decision(decision: Any, segments: list[dict[str, Any]]) -> dict[str, Any]:
+    """Mechanically ground a decision against real segments.
+
+    - If timestamp matches real segments -> 'verified' with segment_ids/timestamps
+    - If no timestamp match, but text found in transcript -> 'candidate'
+    - If no trace found -> 'unresolved'
+    """
+    if isinstance(decision, dict):
+        raw_text = str(decision.get("text") or decision.get("decision") or decision.get("item") or "").strip()
+        raw_stamps = decision.get("timestamps") or []
+        if not isinstance(raw_stamps, list):
+            raw_stamps = [raw_stamps]
+        stamps = [str(s).strip() for s in raw_stamps if str(s).strip()]
+    else:
+        raw_text = str(decision or "").strip()
+        stamps = []
+
+    bracket_stamps = re.findall(r"\[\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*\]", raw_text)
+    paren_stamps = re.findall(r"\(\s*(?:at\s+)?(\d{1,2}:\d{2}(?::\d{2})?)\s*\)", raw_text)
+    for s in bracket_stamps + paren_stamps:
+        if s not in stamps:
+            stamps.append(s)
+
+    clean_text = re.sub(r"\[\s*\d{1,2}:\d{2}(?::\d{2})?\s*\]", "", raw_text)
+    clean_text = re.sub(r"\(\s*(?:at\s+)?\d{1,2}:\d{2}(?::\d{2})?\s*\)", "", clean_text)
+    clean_text = re.sub(r"\[\s*unverified\s*\]", "", clean_text, flags=re.IGNORECASE)
+    clean_text = " ".join(clean_text.split()).strip()
+
+    grounded = _ground_timestamps(stamps, segments) if stamps and segments else {
+        "grounded_timestamps": [],
+        "unresolved_timestamps": stamps,
+        "segment_ids": [],
+        "match_method": None,
+    }
+
+    if grounded["grounded_timestamps"]:
+        return {
+            "text": clean_text,
+            "decision": clean_text,
+            "status": "verified",
+            "timestamps": grounded["grounded_timestamps"],
+            "segment_ids": grounded["segment_ids"],
+        }
+
+    if _is_present_in_transcript(clean_text, segments):
+        return {
+            "text": clean_text,
+            "decision": clean_text,
+            "status": "candidate",
+            "timestamps": [],
+            "segment_ids": [],
+        }
+
+    return {
+        "text": clean_text,
+        "decision": clean_text,
+        "status": "unresolved",
+        "timestamps": [],
+        "segment_ids": [],
+    }
+
+
+def ground_decisions(
+    decisions: list[Any],
+    segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Mechanically ground a list of decisions against segments."""
+    results = []
+    for item in decisions:
+        if not item:
+            continue
+        results.append(ground_decision(item, segments))
+    return results
 
 
 def build_room_manifest(
@@ -234,7 +372,8 @@ def build_room_manifest(
         manifest["error"] = "no timestamped segments in transcript"
 
     manifest["authorityMix"] = classification.get("authorityMix", "mixed")
-    manifest["decisions"] = classification.get("decisions", [])
+    raw_decisions = classification.get("decisions", [])
+    manifest["decisions"] = ground_decisions(raw_decisions, segments) if raw_decisions else []
     manifest["openQuestions"] = classification.get("openQuestions", [])
 
     coverage = verification.get("coverage_score")
@@ -272,4 +411,63 @@ def render_manifest_block(manifest: dict[str, Any]) -> str:
     ]
     if manifest.get("error"):
         lines.append(f"- ⚠️ {manifest['error']}")
+    return "\n".join(lines)
+
+
+def render_decisions_block(
+    manifest_or_decisions: dict[str, Any] | list[Any],
+    segments: list[dict[str, Any]] | None = None,
+) -> str:
+    """Render the '## Decisões' note section.
+
+    - Rendered ONLY when there is >=1 verified or candidate decision.
+    - Verified items are rendered with their grounded timestamps.
+    - Candidate items are rendered without ungrounded timestamps.
+    - Unresolved items are rendered as a concise list with the '[unverified]' marker.
+    - NEVER renders an ungrounded timestamp.
+    """
+    if isinstance(manifest_or_decisions, dict):
+        raw_items = manifest_or_decisions.get("decisions", [])
+    elif isinstance(manifest_or_decisions, list):
+        raw_items = manifest_or_decisions
+    else:
+        return ""
+
+    if not raw_items:
+        return ""
+
+    grounded_items: list[dict[str, Any]] = []
+    for item in raw_items:
+        if isinstance(item, dict) and "status" in item:
+            grounded_items.append(item)
+        else:
+            grounded_items.append(ground_decision(item, segments or []))
+
+    has_verified_or_candidate = any(
+        item.get("status") in ("verified", "candidate")
+        for item in grounded_items
+    )
+    if not has_verified_or_candidate:
+        return ""
+
+    lines = ["## Decisões", ""]
+    for item in grounded_items:
+        text = str(item.get("text") or item.get("decision") or "").strip()
+        text = re.sub(r"\[\s*\d{1,2}:\d{2}(?::\d{2})?\s*\]", "", text)
+        text = re.sub(r"\(\s*(?:at\s+)?\d{1,2}:\d{2}(?::\d{2})?\s*\)", "", text)
+        text = re.sub(r"\[\s*unverified\s*\]", "", text, flags=re.IGNORECASE)
+        text = " ".join(text.split()).strip()
+
+        status = item.get("status", "unresolved")
+        if status == "verified":
+            stamps = item.get("timestamps") or []
+            if stamps:
+                lines.append(f"- {text} (at {', '.join(stamps)})")
+            else:
+                lines.append(f"- {text}")
+        elif status == "candidate":
+            lines.append(f"- {text}")
+        else:
+            lines.append(f"- {text} [unverified]")
+
     return "\n".join(lines)
