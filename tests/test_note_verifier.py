@@ -165,6 +165,162 @@ class RenderVerificationMdTests(unittest.TestCase):
         self.assertIn("- None", report)
 
 
+class TimestampParsingTests(unittest.TestCase):
+    def test_mm_ss(self):
+        self.assertEqual(note_verifier._parse_timestamp("00:12"), 12)
+        self.assertEqual(note_verifier._parse_timestamp("73:10"), 73 * 60 + 10)
+
+    def test_hh_mm_ss(self):
+        self.assertEqual(note_verifier._parse_timestamp("00:00:42"), 42)
+        self.assertEqual(note_verifier._parse_timestamp("1:02:03"), 3723)
+
+    def test_invalid(self):
+        self.assertIsNone(note_verifier._parse_timestamp("99:99"))
+        self.assertIsNone(note_verifier._parse_timestamp("1:2:3:4"))
+        self.assertIsNone(note_verifier._parse_timestamp("abc"))
+        self.assertIsNone(note_verifier._parse_timestamp("00:60"))
+
+    def test_whitespace_tolerated(self):
+        self.assertEqual(note_verifier._parse_timestamp("  00:12 "), 12)
+
+
+class GroundingTests(unittest.TestCase):
+    def _normalize(self, payload):
+        return note_verifier.normalize_verification_payload(payload, SEGMENTS)
+
+    def test_valid_start_timestamp_grounded(self):
+        normalized = self._normalize(
+            {"decision_gaps": [{"item": "gap", "timestamps": ["00:12"]}]}
+        )
+        self.assertEqual(normalized["decision_gaps"], ["gap (at 00:12)"])
+        record = normalized["evidence_grounding"][0]
+        self.assertEqual(record["status"], "grounded")
+        self.assertEqual(record["segment_ids"], [1])
+        self.assertEqual(record["match_method"], "start")
+        self.assertEqual(record["unresolved_timestamps"], [])
+
+    def test_valid_interval_timestamp_grounded(self):
+        normalized = self._normalize(
+            {"decision_gaps": [{"item": "gap", "timestamps": ["00:03"]}]}
+        )
+        record = normalized["evidence_grounding"][0]
+        self.assertEqual(record["status"], "grounded")
+        self.assertEqual(record["segment_ids"], [0])
+        self.assertEqual(record["match_method"], "interval")
+
+    def test_out_of_duration_timestamp_unresolved(self):
+        normalized = self._normalize(
+            {"decision_gaps": [{"item": "gap", "timestamps": ["73:10"]}]}
+        )
+        self.assertEqual(normalized["decision_gaps"], ["gap [unresolved evidence]"])
+        record = normalized["evidence_grounding"][0]
+        self.assertEqual(record["status"], "unresolved")
+        self.assertEqual(record["unresolved_timestamps"], ["73:10"])
+        self.assertEqual(record["segment_ids"], [])
+
+    def test_invented_timestamp_unresolved(self):
+        normalized = self._normalize(
+            {"decision_gaps": [{"item": "gap", "timestamps": ["99:99"]}]}
+        )
+        self.assertEqual(normalized["decision_gaps"], ["gap [unresolved evidence]"])
+        record = normalized["evidence_grounding"][0]
+        self.assertEqual(record["status"], "unresolved")
+        self.assertEqual(record["unresolved_timestamps"], ["99:99"])
+
+    def test_timestamp_in_gap_between_segments_unresolved(self):
+        normalized = self._normalize(
+            {"decision_gaps": [{"item": "gap", "timestamps": ["00:30"]}]}
+        )
+        self.assertEqual(normalized["decision_gaps"], ["gap [unresolved evidence]"])
+        self.assertEqual(normalized["evidence_grounding"][0]["status"], "unresolved")
+
+    def test_mixed_grounded_and_unresolved(self):
+        normalized = self._normalize(
+            {"decision_gaps": [{"item": "gap", "timestamps": ["00:12", "99:99"]}]}
+        )
+        self.assertEqual(
+            normalized["decision_gaps"], ["gap (at 00:12) [unresolved evidence]"]
+        )
+        record = normalized["evidence_grounding"][0]
+        self.assertEqual(record["status"], "unresolved")
+        self.assertEqual(record["grounded_timestamps"], ["00:12"])
+        self.assertEqual(record["unresolved_timestamps"], ["99:99"])
+        self.assertEqual(record["segment_ids"], [1])
+
+    def test_missing_timestamps_marked_unresolved(self):
+        normalized = self._normalize(
+            {"decision_gaps": [{"item": "gap"}], "unsupported_claims": ["plain"]}
+        )
+        self.assertEqual(normalized["decision_gaps"], ["gap [unresolved evidence]"])
+        self.assertEqual(normalized["unsupported_claims"], ["plain"])
+        self.assertEqual(len(normalized["evidence_grounding"]), 1)
+        self.assertEqual(normalized["evidence_grounding"][0]["status"], "unresolved")
+        self.assertEqual(normalized["evidence_grounding"][0]["section"], "decision_gaps")
+
+    def test_string_items_get_no_grounding_record(self):
+        normalized = self._normalize({"action_item_gaps": ["plain"]})
+        self.assertEqual(normalized["action_item_gaps"], ["plain"])
+        self.assertEqual(normalized["evidence_grounding"], [])
+
+    def test_legacy_call_without_segments_preserved(self):
+        normalized = note_verifier.normalize_verification_payload(
+            {"decision_gaps": [{"item": "gap", "timestamps": ["00:12"]}]}
+        )
+        self.assertEqual(normalized["decision_gaps"], ["gap (at 00:12)"])
+        self.assertEqual(normalized["evidence_grounding"], [])
+
+
+class GroundedVerifyExportTests(unittest.TestCase):
+    def _export(self, payload):
+        with patch.object(note_verifier, "call_openrouter", return_value=payload):
+            return verify_export(SEGMENTS, "note", "tasks")
+
+    def test_invented_timestamp_never_rendered_as_evidence(self):
+        payload = (
+            '{"coverage_score": 0.4, '
+            '"decision_gaps": [{"item": "budget owner", "timestamps": ["99:99"]}], '
+            '"action_item_gaps": [], "speaker_attribution_risks": [], '
+            '"unsupported_claims": [], "recommended_note_additions": []}'
+        )
+        result = self._export(payload)
+        self.assertEqual(result["decision_gaps"], ["budget owner [unresolved evidence]"])
+        self.assertNotIn("(at 99:99)", result["decision_gaps"][0])
+        md = render_verification_md(result)
+        self.assertNotIn("(at 99:99)", md)
+        self.assertIn("unresolved", md)
+
+    def test_valid_timestamp_grounded_in_artifact(self):
+        payload = (
+            '{"coverage_score": 0.4, '
+            '"decision_gaps": [{"item": "budget owner", "timestamps": ["00:12"]}], '
+            '"action_item_gaps": [], "speaker_attribution_risks": [], '
+            '"unsupported_claims": [], "recommended_note_additions": []}'
+        )
+        result = self._export(payload)
+        self.assertEqual(result["decision_gaps"], ["budget owner (at 00:12)"])
+        record = result["evidence_grounding"][0]
+        self.assertEqual(record["status"], "grounded")
+        self.assertEqual(record["segment_ids"], [1])
+        self.assertEqual(record["match_method"], "start")
+
+    def test_out_of_duration_timestamp_marked_unresolved(self):
+        payload = (
+            '{"coverage_score": 0.4, '
+            '"decision_gaps": [{"item": "budget owner", "timestamps": ["73:10"]}], '
+            '"action_item_gaps": [], "speaker_attribution_risks": [], '
+            '"unsupported_claims": [], "recommended_note_additions": []}'
+        )
+        result = self._export(payload)
+        self.assertEqual(result["decision_gaps"], ["budget owner [unresolved evidence]"])
+        record = result["evidence_grounding"][0]
+        self.assertEqual(record["status"], "unresolved")
+        self.assertEqual(record["unresolved_timestamps"], ["73:10"])
+
+    def test_no_segments_result_has_grounding_key(self):
+        result = verify_export([], "note", "tasks")
+        self.assertIn("evidence_grounding", result)
+
+
 class ArtifactTests(unittest.TestCase):
     def test_artifact_shape(self):
         artifact = build_verification_artifact(
@@ -175,6 +331,20 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(artifact["schema"], "meetcap.verification/1")
         self.assertEqual(artifact["transcript_file"], "m.wav")
         self.assertEqual(artifact["coverage_score"], 0.8)
+
+    def test_grounding_flowed_into_artifact(self):
+        grounding = [
+            {"section": "decision_gaps", "item": "gap", "status": "unresolved",
+             "grounded_timestamps": [], "unresolved_timestamps": ["99:99"],
+             "segment_ids": [], "match_method": None},
+        ]
+        artifact = build_verification_artifact(
+            {"coverage_score": 0.4, "needs_human_review": True, "error": None,
+             "evidence_grounding": grounding},
+            meeting_date="2026-08-14",
+            transcript_file="m.wav",
+        )
+        self.assertEqual(artifact["evidence_grounding"], grounding)
 
 
 if __name__ == "__main__":

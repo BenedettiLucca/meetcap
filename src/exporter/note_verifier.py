@@ -25,6 +25,26 @@ _FLAG_KEYS = (
 )
 
 
+def _parse_timestamp(value: Any) -> int | None:
+    """Parse 'MM:SS' or 'HH:MM:SS' to seconds; None when malformed.
+
+    'MM:SS' tolerates minutes >= 60 (e.g. '73:10' = 73m 10s); 'HH:MM:SS'
+    requires minutes and seconds within 0-59.
+    """
+    parts = str(value).strip().split(":")
+    if len(parts) not in (2, 3) or not all(part.isdigit() for part in parts):
+        return None
+    if len(parts) == 2:
+        minutes, seconds = int(parts[0]), int(parts[1])
+        if seconds > 59:
+            return None
+        return minutes * 60 + seconds
+    hours, minutes, seconds = (int(part) for part in parts)
+    if minutes > 59 or seconds > 59:
+        return None
+    return hours * 3600 + minutes * 60 + seconds
+
+
 def _item_to_text(item: Any) -> str:
     """Normalize a gap item (string or {item, timestamps}) to plain text."""
     if isinstance(item, str):
@@ -40,8 +60,90 @@ def _item_to_text(item: Any) -> str:
     return ""
 
 
-def normalize_verification_payload(payload: Any) -> dict[str, Any]:
-    """Validate and clamp a raw verification payload."""
+def _ground_timestamps(stamps: list[str], segments: list[dict[str, Any]]) -> dict[str, Any]:
+    """Mechanically resolve timestamps against real segment intervals.
+
+    A timestamp grounds when it falls inside [start, end] of a segment
+    (match_method 'interval') or equals a segment start ('start').
+    Malformed or out-of-duration timestamps are returned as unresolved.
+    """
+    intervals: list[tuple[int, int, Any]] = []
+    for segment in segments:
+        start = _parse_timestamp(segment.get("start"))
+        end = _parse_timestamp(segment.get("end"))
+        if start is not None and end is not None:
+            intervals.append((start, end, segment.get("index")))
+
+    grounded: list[str] = []
+    unresolved: list[str] = []
+    segment_ids: list[Any] = []
+    match_method: str | None = None
+    for raw in stamps:
+        seconds = _parse_timestamp(raw)
+        if seconds is None:
+            unresolved.append(raw)
+            continue
+        matched = [seg_idx for seg_start, seg_end, seg_idx in intervals
+                   if seg_start <= seconds <= seg_end]
+        if not matched:
+            unresolved.append(raw)
+            continue
+        if match_method is None:
+            match_method = "start" if any(seg_start == seconds for seg_start, _, _ in intervals) else "interval"
+        for seg_idx in matched:
+            if seg_idx not in segment_ids:
+                segment_ids.append(seg_idx)
+        grounded.append(raw)
+    return {
+        "grounded_timestamps": grounded,
+        "unresolved_timestamps": unresolved,
+        "segment_ids": segment_ids,
+        "match_method": match_method,
+    }
+
+
+def _grounded_item(item: Any, key: str, segments: list[dict[str, Any]]) -> tuple[str, dict[str, Any] | None]:
+    """Render one QA flag item and record its mechanical evidence grounding.
+
+    Grounded timestamps are rendered as '(at ...)' only when they resolve
+    to real segments; an invalid, missing, or out-of-range timestamp is
+    never presented as evidence (rendered with an explicit marker instead).
+    """
+    if not isinstance(item, dict):
+        return _item_to_text(item), None
+    text = " ".join(str(item.get("item") or item.get("description") or "").split())
+    if not text:
+        return "", None
+    stamps = item.get("timestamps") or []
+    if not isinstance(stamps, list):
+        stamps = []
+    stamps = [str(s) for s in stamps if str(s).strip()][:3]
+    grounded = _ground_timestamps(stamps, segments)
+    if grounded["grounded_timestamps"]:
+        text = f"{text} (at {', '.join(grounded['grounded_timestamps'])})"
+    if grounded["unresolved_timestamps"] or not stamps:
+        text = f"{text} [unresolved evidence]"
+    record = {
+        "section": key,
+        "status": "grounded" if stamps and not grounded["unresolved_timestamps"] else "unresolved",
+        "grounded_timestamps": grounded["grounded_timestamps"],
+        "unresolved_timestamps": grounded["unresolved_timestamps"],
+        "segment_ids": grounded["segment_ids"],
+        "match_method": grounded["match_method"],
+    }
+    return text, record
+
+
+def normalize_verification_payload(
+    payload: Any,
+    segments: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Validate and clamp a raw verification payload.
+
+    With ``segments`` given, QA flag items are mechanically grounded
+    against the real transcript intervals and an ``evidence_grounding``
+    record list is produced; without it, legacy rendering is preserved.
+    """
     source = payload if isinstance(payload, dict) else {}
 
     try:
@@ -52,18 +154,26 @@ def normalize_verification_payload(payload: Any) -> dict[str, Any]:
         coverage = min(1.0, max(0.0, coverage))
 
     normalized: dict[str, Any] = {"coverage_score": coverage}
+    grounding_records: list[dict[str, Any]] = []
     for key in _FLAG_KEYS:
         raw = source.get(key, [])
         if not isinstance(raw, list):
             raw = []
-        items = [text for text in (_item_to_text(item) for item in raw) if text]
-        normalized[key] = items[:QA_MAX_ITEMS]
+        if segments is None:
+            items = [text for text in (_item_to_text(item) for item in raw) if text]
+            normalized[key] = items[:QA_MAX_ITEMS]
+            continue
+        pairs = [_grounded_item(item, key, segments) for item in raw]
+        kept = [pair for pair in pairs if pair[0]][:QA_MAX_ITEMS]
+        normalized[key] = [text for text, _ in kept]
+        grounding_records.extend(record for _, record in kept if record)
 
     additions_raw = source.get("recommended_note_additions", [])
     if not isinstance(additions_raw, list):
         additions_raw = []
     additions = [text for text in (_item_to_text(item) for item in additions_raw) if text]
     normalized["recommended_note_additions"] = additions[:QA_MAX_ITEMS]
+    normalized["evidence_grounding"] = grounding_records
 
     return normalized
 
@@ -143,6 +253,7 @@ def verify_export(
         "speaker_attribution_risks": [],
         "unsupported_claims": [],
         "recommended_note_additions": [],
+        "evidence_grounding": [],
         "needs_human_review": False,
         "error": None,
     }
@@ -165,7 +276,7 @@ def verify_export(
         result["error"] = f"verification failed: {exc}"
         return result
 
-    result.update(normalize_verification_payload(payload))
+    result.update(normalize_verification_payload(payload, segments))
     coverage = result["coverage_score"]
     below_threshold = coverage is not None and coverage < QA_COVERAGE_THRESHOLD
     result["needs_human_review"] = bool(
