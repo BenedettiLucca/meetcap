@@ -1,6 +1,7 @@
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,7 @@ from .config import (
     EXPORT_MANIFEST_ENABLED,
 )
 from .transcript_parser import parse_meetcap_transcript
-from .summarizer import generate_summary
+from .summarizer import generate_summary, get_max_concurrency
 from .task_extractor import generate_task_suggestions
 from .claim_extractor import (
     extract_claims,
@@ -141,41 +142,56 @@ def export_note(txt_path: Path, custom_title: str | None = None) -> dict[str, An
     if not data["transcript_text"].strip():
         return {"success": False, "error": "Transcript is empty"}
 
-    print(f"[EXPORT] Generating AI summary for {txt_path.name}...")
-    summary = generate_summary(data["transcript_text"])
-    print(f"[EXPORT] Summary generated ({len(summary)} chars)")
+    max_concurrency = get_max_concurrency()
+    print(f"[EXPORT] Generating AI summary and extracting claims for {txt_path.name}...")
+    with ThreadPoolExecutor(max_workers=min(2, max_concurrency)) as executor:
+        future_summary = executor.submit(generate_summary, data["transcript_text"])
+        future_claims = executor.submit(extract_claims, data["segments"], data["transcript_text"])
 
-    print("[EXPORT] Generating task suggestions...")
-    task_suggestions = generate_task_suggestions(
-        meeting_date=data["meeting_date"],
-        summary=summary,
-        transcript_text=data["transcript_text"],
-    )
-    print(f"[EXPORT] Task suggestions generated ({len(task_suggestions)} chars)")
+        try:
+            summary = future_summary.result()
+        except Exception as exc:
+            summary = f"> [!warning] Summary generation failed: {exc}"
+        print(f"[EXPORT] Summary generated ({len(summary)} chars)")
 
-    # #38: per-stage health for the outcome contract — degradation is not success.
-    stages: dict[str, dict[str, Any]] = {
-        "summary": _stage(_warning_degradation(summary)),
-        "tasks": _stage(_warning_degradation(task_suggestions)),
-    }
+        print("[EXPORT] Generating task suggestions...")
+        task_suggestions = generate_task_suggestions(
+            meeting_date=data["meeting_date"],
+            summary=summary,
+            transcript_text=data["transcript_text"],
+        )
+        print(f"[EXPORT] Task suggestions generated ({len(task_suggestions)} chars)")
 
-    # Canonical entity resolution: derived surfaces only, raw transcript untouched.
-    vocabulary = load_vocabulary()
-    summary, summary_corrections = resolve_derived_surfaces(summary, vocabulary)
-    task_suggestions, task_corrections = resolve_derived_surfaces(task_suggestions, vocabulary)
-    corrections = summary_corrections + task_corrections
-    corrections_block = render_name_corrections(corrections)
-    if corrections:
-        print(f"[EXPORT] Entity resolver: {len(corrections)} correction(s) flagged")
+        # #38: per-stage health for the outcome contract — degradation is not success.
+        stages: dict[str, dict[str, Any]] = {
+            "summary": _stage(_warning_degradation(summary)),
+            "tasks": _stage(_warning_degradation(task_suggestions)),
+        }
 
-    print("[EXPORT] Extracting evidence-backed claims...")
-    claims_result = extract_claims(data["segments"], data["transcript_text"])
-    claims_block = render_claims_block(claims_result)
-    stages["claims"] = _stage(claims_result.get("error"))
-    print(
-        f"[EXPORT] Claims extracted ({len(claims_result['claims'])} verified, "
-        f"{claims_result['dropped_unresolved']} dropped)"
-    )
+        # Canonical entity resolution: derived surfaces only, raw transcript untouched.
+        vocabulary = load_vocabulary()
+        summary, summary_corrections = resolve_derived_surfaces(summary, vocabulary)
+        task_suggestions, task_corrections = resolve_derived_surfaces(task_suggestions, vocabulary)
+        corrections = summary_corrections + task_corrections
+        corrections_block = render_name_corrections(corrections)
+        if corrections:
+            print(f"[EXPORT] Entity resolver: {len(corrections)} correction(s) flagged")
+
+        try:
+            claims_result = future_claims.result()
+        except Exception as exc:
+            claims_result = {
+                "claims": [],
+                "dropped_unresolved": 0,
+                "error": f"claim extraction failed: {exc}",
+            }
+
+        claims_block = render_claims_block(claims_result)
+        stages["claims"] = _stage(claims_result.get("error"))
+        print(
+            f"[EXPORT] Claims extracted ({len(claims_result['claims'])} verified, "
+            f"{claims_result['dropped_unresolved']} dropped)"
+        )
 
     title = build_note_title(data, custom_title)
     safe_name = title.replace("/", "-").replace(":", "-")
