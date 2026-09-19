@@ -131,6 +131,32 @@ class DaemonProcess:
         return ""
 
 
+@pytest.fixture(autouse=True)
+def _isolate_transcription_edges(monkeypatch):
+    """Keep in-proc meetcap tests off the host's router/export stack.
+
+    - `transcribe_via_router` really POSTs to 127.0.0.1:8090 and blocks up to
+      its full timeout when the local router is up but busy — fail fast instead
+      so tests deterministically exercise the in-proc fallback path.
+    - `_get_worker_queue` lazily starts the durable export worker (#16), which
+      can drain queued jobs after the test's own patches are gone (race with
+      `auto_export` running for real). A fresh queue per test keeps jobs inert.
+    """
+    import queue as _queue
+    import sys as _sys
+
+    src_dir = str(Path(__file__).resolve().parent.parent / "src")
+    if src_dir not in _sys.path:
+        _sys.path.insert(0, src_dir)
+    import meetcap
+
+    def _router_disabled(_wav):
+        raise RuntimeError("router disabled in tests")
+
+    monkeypatch.setattr(meetcap, "transcribe_via_router", _router_disabled)
+    monkeypatch.setattr(meetcap, "_get_worker_queue", lambda: _queue.Queue())
+
+
 @pytest.fixture
 def wait_socket() -> Callable[..., bool]:
     """Helper fixture to wait for socket availability."""
