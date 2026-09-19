@@ -5,7 +5,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import transcript_segments
-from transcript_segments import aggregate_segments, format_transcript_lines
+from exporter.transcript_parser import parse_transcript_segments
+from transcript_segments import aggregate_segments, format_transcript_lines, parse_timestamp
 
 
 def segs(*pairs):
@@ -85,6 +86,34 @@ class FormatterTests(unittest.TestCase):
     def test_merged_spans_use_first_start_last_end(self):
         lines = format_transcript_lines(segs((0.0, 2.0, "a"), (2.4, 90.0, "b")))
         self.assertEqual(lines, ["[00:00 → 01:30] a b"])
+
+
+class RoundTripTests(unittest.TestCase):
+    """#26 — parse_timestamp must round-trip every form the formatter emits."""
+
+    def test_round_trip_total_minutes_and_hour_branches(self):
+        for seconds in (5, 3599, 3600, 3725, 6000, 6007, 132459):
+            line = format_transcript_lines([{"start": float(seconds),
+                                              "end": float(seconds + 1),
+                                              "text": "t"}])[0]
+            parsed = parse_transcript_segments(line)
+            self.assertEqual(len(parsed), 1, msg=f"line {line!r} must parse back")
+            self.assertEqual(parsed[0]["text"], "t")
+            self.assertEqual(parse_timestamp(parsed[0]["start"]), seconds, msg=line)
+            self.assertEqual(parse_timestamp(parsed[0]["end"]), seconds + 1, msg=line)
+
+    def test_round_trip_under_one_hour(self):
+        line = format_transcript_lines(segs((0.0, 599.0, "x")))[0]
+        parsed = parse_transcript_segments(line)
+        self.assertEqual(parse_timestamp(parsed[0]["start"]), 0)
+        self.assertEqual(parse_timestamp(parsed[0]["end"]), 599)
+
+    def test_round_trip_at_and_over_one_hour(self):
+        for start_s in (3600.0, 6007.0, 7200.0):
+            line = format_transcript_lines(segs((start_s, start_s + 5.0, "y")))[0]
+            parsed = parse_transcript_segments(line)
+            self.assertEqual(parse_timestamp(parsed[0]["start"]), int(start_s))
+            self.assertEqual(parse_timestamp(parsed[0]["end"]), int(start_s) + 5)
 
 
 class CallSiteContractTests(unittest.TestCase):
