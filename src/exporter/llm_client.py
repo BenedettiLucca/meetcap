@@ -44,8 +44,11 @@ def load_openrouter_key() -> str:
     return keys.get("OPENROUTER_API_KEY", "").strip()
 
 
-def should_retry_without_structured_output(error: RuntimeError) -> bool:
+def should_retry_without_structured_output(error: Exception | RuntimeError) -> bool:
     """Decide whether it is worth retrying without response_format."""
+    if isinstance(error, LLMTransportError):
+        return False
+
     message = str(error).lower()
     fatal_terms = (
         "no api key",
@@ -56,7 +59,25 @@ def should_retry_without_structured_output(error: RuntimeError) -> bool:
         "rate limit",
         "quota",
     )
-    return not any(term in message for term in fatal_terms)
+    if any(term in message for term in fatal_terms):
+        return False
+
+    if "http 5" in message:
+        return False
+
+    structured_output_terms = (
+        "response_format",
+        "response format",
+        "structured output",
+        "structured_output",
+        "schema",
+        "json parsing",
+        "json parse",
+        "parse json",
+        "parsing json",
+        "json_object",
+    )
+    return any(term in message for term in structured_output_terms)
 
 
 def _build_client() -> httpx.Client:

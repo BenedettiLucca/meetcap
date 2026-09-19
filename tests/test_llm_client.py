@@ -124,30 +124,57 @@ class LLMClientTests(unittest.TestCase):
 
 
 class RetryDecisionTests(unittest.TestCase):
-    def test_fatal_errors_do_not_retry(self):
-        for message in (
-            "no API key configured",
-            "HTTP 401: invalid key",
-            "HTTP 403: forbidden",
-            "authorization failed",
-            "insufficient credits",
-            "rate limit exceeded",
-            "quota exceeded",
-        ):
-            with self.subTest(message=message):
+    def test_non_structured_output_errors_do_not_retry(self):
+        non_retryable = (
+            # Auth / quota
+            RuntimeError("no API key configured"),
+            RuntimeError("HTTP 401: invalid key"),
+            RuntimeError("HTTP 403: forbidden"),
+            RuntimeError("authorization failed"),
+            RuntimeError("insufficient credits"),
+            RuntimeError("rate limit exceeded"),
+            RuntimeError("quota exceeded"),
+            # Transport (timeout, connection, DNS)
+            RuntimeError("request failed: timed out"),
+            RuntimeError("request failed: ReadTimeout"),
+            RuntimeError("request failed: ConnectTimeout"),
+            RuntimeError("request failed: connection refused"),
+            RuntimeError("request failed: [Errno -2] Name or service not known"),
+            llm_client.LLMTransportError("request failed: read timeout"),
+            # 5xx
+            RuntimeError("HTTP 500: internal error"),
+            RuntimeError("HTTP 502: bad gateway"),
+            RuntimeError("HTTP 503: service unavailable"),
+            RuntimeError("HTTP 504: gateway timeout"),
+            llm_client.LLMHTTPError("HTTP 500: internal error"),
+            # Generic response issues
+            RuntimeError("no choices returned"),
+            RuntimeError("empty response content"),
+        )
+        for error in non_retryable:
+            with self.subTest(error=str(error)):
                 self.assertFalse(
-                    llm_client.should_retry_without_structured_output(RuntimeError(message))
+                    llm_client.should_retry_without_structured_output(error)
                 )
 
-    def test_other_errors_retry(self):
-        for message in (
-            "no choices returned",
-            "HTTP 500: internal error",
-            "invalid JSON response",
-        ):
-            with self.subTest(message=message):
+    def test_structured_output_errors_do_retry(self):
+        retryable = (
+            RuntimeError("unsupported response_format type"),
+            RuntimeError("'response_format' is not supported by this model"),
+            RuntimeError("provider does not support response_format"),
+            RuntimeError("structured output not supported"),
+            RuntimeError("unsupported structured_output"),
+            RuntimeError("schema validation failed"),
+            RuntimeError("json_schema is invalid"),
+            RuntimeError("JSON parsing failed"),
+            RuntimeError("failed to parse JSON response"),
+            RuntimeError("json_object is not supported"),
+            llm_client.LLMHTTPError("HTTP 400: response_format is not supported"),
+        )
+        for error in retryable:
+            with self.subTest(error=str(error)):
                 self.assertTrue(
-                    llm_client.should_retry_without_structured_output(RuntimeError(message))
+                    llm_client.should_retry_without_structured_output(error)
                 )
 
 
