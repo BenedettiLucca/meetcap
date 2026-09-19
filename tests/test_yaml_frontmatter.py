@@ -1,6 +1,4 @@
 """Tests for YAML frontmatter escaping and safe_name (#40, #51)."""
-import json
-import re
 import sys
 import tempfile
 import unittest

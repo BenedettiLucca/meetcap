@@ -5,7 +5,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 # Add src to path so we can import exporter
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))

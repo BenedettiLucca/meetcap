@@ -16,7 +16,7 @@ from .prompts import (
 )
 from .llm_client import call_openrouter, should_retry_without_structured_output
 from .transcript_parser import truncate_text
-from .note_verifier import _parse_timestamp, _ground_timestamps
+from .note_verifier import _ground_timestamps
 from .claim_extractor import normalize_for_match
 
 AUTHORITY_MIXES = ("decision-heavy", "discussion-heavy", "mixed")
