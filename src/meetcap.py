@@ -529,13 +529,18 @@ def transcribe_cmd(watchdog_timeout: float = 3600.0):
 
 # ── Helpers ──────────────────────────────────────────────────────────
 def notify(title, body, subtitle=""):
+    # #44: notify-send accepts at most 2 positionals (SUMMARY [BODY]); the
+    # old code appended `subtitle` as a third positional and every desktop
+    # notification failed with rc=1 in silence. libnotify has no subtitle —
+    # merge it into the body and use `-a` for app grouping instead.
+    full_body = f"{body}\n{subtitle}" if subtitle else body
+    cmd = ["notify-send", "-a", "Meetcap", title, full_body]
     try:
-        cmd = ["notify-send", title, body]
-        if subtitle:
-            cmd.append(subtitle)
-        subprocess.run(cmd, timeout=3, capture_output=True)
-    except (OSError, subprocess.SubprocessError):
-        pass
+        proc = subprocess.run(cmd, timeout=3, capture_output=True, text=True)
+        if proc.returncode != 0:
+            print(f"[NOTIFY] rc={proc.returncode}: {proc.stderr.strip()}")
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"[NOTIFY] failed: {e}")
 
 
 # ── Socket Server ────────────────────────────────────────────────────

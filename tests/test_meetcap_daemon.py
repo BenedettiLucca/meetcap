@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import socket
 import subprocess
@@ -131,6 +133,49 @@ class NotifyTests(unittest.TestCase):
     def test_notify_swallows_missing_binary(self):
         with patch("meetcap.subprocess.run", side_effect=FileNotFoundError("notify-send")):
             meetcap.notify("Meetcap", "title", "body")
+
+    # #44 regression: notify-send accepts at most 2 positionals; the old code
+    # appended `subtitle` as a third positional and every notification failed
+    # with rc=1 ("Invalid number of options.") in silence.
+    def test_notify_sends_exactly_two_positionals(self):
+        with patch("meetcap.subprocess.run") as run:
+            run.return_value = Mock(returncode=0, stderr="")
+            meetcap.notify("Meetcap", "Recording started", "mic=foo")
+        argv = run.call_args.args[0]
+        # -a value, title, merged body — exactly 2 positionals after options.
+        self.assertEqual(
+            argv, ["notify-send", "-a", "Meetcap", "Meetcap", "Recording started\nmic=foo"]
+        )
+
+    def test_notify_subtitle_is_merged_into_body(self):
+        with patch("meetcap.subprocess.run") as run:
+            run.return_value = Mock(returncode=0, stderr="")
+            meetcap.notify("Meetcap", "Recording started", "mic=foo\nsys=bar")
+        argv = run.call_args.args[0]
+        self.assertEqual(
+            argv,
+            [
+                "notify-send",
+                "-a",
+                "Meetcap",
+                "Meetcap",
+                "Recording started\nmic=foo\nsys=bar",
+            ],
+        )
+
+    def test_notify_without_subtitle_keeps_body_untouched(self):
+        with patch("meetcap.subprocess.run") as run:
+            run.return_value = Mock(returncode=0, stderr="")
+            meetcap.notify("Meetcap", "plain body")
+        argv = run.call_args.args[0]
+        self.assertEqual(argv, ["notify-send", "-a", "Meetcap", "Meetcap", "plain body"])
+
+    def test_notify_logs_nonzero_returncode(self):
+        with patch("meetcap.subprocess.run") as run:
+            run.return_value = Mock(returncode=1, stderr="Invalid number of options.")
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                meetcap.notify("Meetcap", "title", "body")
+        self.assertIn("[NOTIFY] rc=1", out.getvalue())
 
 
 class ClientHandlerTests(unittest.TestCase):
