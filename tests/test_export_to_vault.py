@@ -293,5 +293,17 @@ class TaskPrivacyTests(unittest.TestCase):
         self.assertGreater(config.TASK_SUGGESTIONS_TRANSCRIPT_MAX_CHARS, 0)
 
 
+class SummaryTemperatureContractTests(unittest.TestCase):
+    """SUMMARY_TEMPERATURE must be in the range [0.2, 0.3]."""
+
+    def test_summary_temperature_upper_bound(self):
+        """SUMMARY_TEMPERATURE must be <= 0.3 (issue #48)."""
+        self.assertLessEqual(config.SUMMARY_TEMPERATURE, 0.3)
+
+    def test_summary_temperature_lower_bound(self):
+        """SUMMARY_TEMPERATURE must be >= 0.2 (issue #48)."""
+        self.assertGreaterEqual(config.SUMMARY_TEMPERATURE, 0.2)
+
+
 if __name__ == "__main__":
     unittest.main()

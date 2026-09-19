@@ -11,3 +11,4 @@ build/
 .env.*
 !.env.example
 REVIEW_NOTES.md
+.omh/
