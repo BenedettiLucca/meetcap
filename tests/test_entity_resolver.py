@@ -12,7 +12,6 @@ from exporter.entity_resolver import (
     normalize_term,
     render_name_corrections,
     resolve_derived_surfaces,
-    resolve_entities,
     score_candidate,
     slug_to_display,
 )

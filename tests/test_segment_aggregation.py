@@ -4,7 +4,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-import transcript_segments
 from exporter.transcript_parser import parse_transcript_segments
 from transcript_segments import aggregate_segments, format_transcript_lines, parse_timestamp
 

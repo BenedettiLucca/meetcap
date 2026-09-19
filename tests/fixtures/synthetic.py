@@ -5,7 +5,6 @@ Generates minimal valid synthetic files for testing.
 """
 
 from pathlib import Path
-import wave
 from typing import Union
 
 
