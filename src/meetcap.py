@@ -264,11 +264,6 @@ def stop_recording():
 
 
 # ── Transcription ────────────────────────────────────────────────────
-def format_timestamp(seconds):
-    m, s = divmod(int(seconds), 60)
-    return f"{m:02d}:{s:02d}"
-
-
 ROUTER_TRANSCRIBE_URL = "http://127.0.0.1:8090/v1/audio/transcriptions"
 
 
