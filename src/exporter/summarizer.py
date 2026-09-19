@@ -1,3 +1,6 @@
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 from .config import (
     SUMMARY_MAX_TOKENS,
     SUMMARY_TEMPERATURE,
@@ -14,6 +17,21 @@ from .prompts import (
 )
 from .llm_client import call_openrouter
 from .transcript_parser import split_transcript_into_chunks
+
+DEFAULT_EXPORT_MAX_CONCURRENCY = 2
+MAX_EXPORT_CONCURRENCY = 4
+
+def get_max_concurrency() -> int:
+    """Return bounded export concurrency from MEETCAP_EXPORT_MAX_CONCURRENCY (default 2, max 4)."""
+    raw = os.environ.get("MEETCAP_EXPORT_MAX_CONCURRENCY", "").strip()
+    if not raw:
+        return DEFAULT_EXPORT_MAX_CONCURRENCY
+    try:
+        val = int(raw)
+    except (ValueError, TypeError):
+        return DEFAULT_EXPORT_MAX_CONCURRENCY
+    return max(1, min(MAX_EXPORT_CONCURRENCY, val))
+
 
 def summarize_transcript_chunk(transcript_text: str, chunk_index: int, total_chunks: int) -> str:
     """Summarize one transcript chunk using the normal meeting-note schema."""
@@ -101,6 +119,7 @@ def generate_summary(
     single_pass_max_chars: int = SUMMARY_SINGLE_PASS_MAX_CHARS,
     chunk_max_chars: int = SUMMARY_CHUNK_MAX_CHARS,
     merge_max_chars: int = SUMMARY_MERGE_MAX_CHARS,
+    max_concurrency: int | None = None,
 ) -> str:
     """Generate the meeting summary block, chunking long meetings before consolidation."""
     try:
@@ -116,11 +135,25 @@ def generate_summary(
                 reasoning_effort="none",
             )
 
+        concurrency = (
+            get_max_concurrency()
+            if max_concurrency is None
+            else max(1, min(MAX_EXPORT_CONCURRENCY, max_concurrency))
+        )
         chunks = split_transcript_into_chunks(transcript_text, max_chars=chunk_max_chars)
-        chunk_summaries = [
-            summarize_transcript_chunk(chunk, index, len(chunks))
-            for index, chunk in enumerate(chunks, start=1)
-        ]
+        effective_workers = min(concurrency, len(chunks))
+        if effective_workers > 1:
+            with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+                futures = [
+                    executor.submit(summarize_transcript_chunk, chunk, index, len(chunks))
+                    for index, chunk in enumerate(chunks, start=1)
+                ]
+                chunk_summaries = [f.result() for f in futures]
+        else:
+            chunk_summaries = [
+                summarize_transcript_chunk(chunk, index, len(chunks))
+                for index, chunk in enumerate(chunks, start=1)
+            ]
         return reduce_chunk_summaries(chunk_summaries, merge_max_chars)
     except Exception as exc:
         return f"> [!warning] Summary generation failed: {exc}"
