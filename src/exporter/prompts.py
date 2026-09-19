@@ -7,8 +7,7 @@ Rules:
 - Be concrete. Avoid generic filler such as "the meeting discussed various topics".
 - Only include claims supported by the transcript.
 - Distinguish decisions, action items, and open risks.
-- If an owner is not explicitly clear, do not invent one.
-- Do not append owner labels or speaker placeholders to action items; write the action only.
+- If an owner or deadline is explicitly stated in the transcript, include it on the action item. If absent, append `(owner unspecified)` / `(deadline unspecified)`. Never invent owners or deadlines.
 - If something is uncertain or ambiguous, say so briefly instead of hallucinating certainty.
 - Deduplicate overlapping bullets.
 - In `## ✅ Action Items`, every bullet must start with `- [ ] `.
@@ -37,8 +36,7 @@ Transcript:
 Reminder after reading the transcript:
 - Same language as the transcript.
 - Keep the summary specific and decision-useful.
-- Do not invent owners.
-- Do not append owner labels, role labels, or speaker placeholders to action items.
+- If an owner or deadline is explicitly stated in the transcript, include it on the action item. If absent, append `(owner unspecified)` / `(deadline unspecified)`. Never invent owners or deadlines.
 - Use checkbox bullets in `## ✅ Action Items`.
 - Start directly with ## 📌 Summary."""
 
