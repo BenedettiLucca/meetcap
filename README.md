@@ -10,13 +10,19 @@ No cloud recording. No third-party transcription APIs. Your audio never leaves y
 
 ## ✨ Features
 
-- **Dual-channel recording** — mic on the left channel, system audio on the right, via PipeWire/ffmpeg
-- **GPU transcription** — faster-whisper with CUDA (large-v3-turbo by default, configurable)
-- **AI meeting summary** — structured notes with Summary, Key Points, Action Items, and Risks sections, via OpenRouter
-- **Smart chunking** — long meetings (1h+) are split into chunks, summarized individually, then hierarchically merged
-- **Task suggestions** — compares the transcript against your Obsidian daily task list and surfaces matched + new tasks
-- **Obsidian vault export** — notes are written directly to your vault with frontmatter, ready to search and link
-- **Daemon + rofi UI** — runs as a systemd service, controlled via a rofi menu bound to a keybind
+- **Dual-channel recording** — mic on the left channel, system audio on the right, via PipeWire/ffmpeg with disk space preflight (`MEETCAP_MIN_FREE_GB`) and collision-safe naming
+- **GPU transcription** — faster-whisper with CUDA (large-v3-turbo by default, configurable), aggregating pauses < 0.5s into natural sentence/turn spans
+- **Resilient timestamp parsing** — handles timestamps in `MM:SS` (supporting total minutes > 59) and `H:MM:SS` without truncation
+- **AI meeting summary** — structured notes with Summary (`SUMMARY_TEMPERATURE = 0.3`), Key Points, Action Items (with explicit dictated owner/deadline markers), Open Questions / Risks, and Decisions, via OpenRouter
+- **Bounded concurrent export** — parallelized chunk summarization and claims extraction controlled by `MEETCAP_EXPORT_MAX_CONCURRENCY` (1–4 workers)
+- **Grounded Evidence & Decisions** — mechanical exact/fuzzy claim grounding in `evidence.json`, plus verified/candidate/unresolved decision tracking in notes
+- **Advisory QA verification** — full-meeting chunked QA evaluating coverage score, decision gaps, action item gaps (triggering `needs_human_review`), unsupported claims, and clear speaker attribution status (`not_assessable`, no diarization)
+- **Canonical entity resolution** — vault wiki & glossary canonical entity matching; `alias` and `fuzzy` rules auto-apply while `substring` matches are audit-only in `corrections.json`
+- **Local-first task suggestions** — anti-rewording against summary action items and local deduplication; your Obsidian daily task context never leaves your machine
+- **Durable export jobs** — background export queue with retries, status tracking (`exporting`, `last_export`), and explicit outcome reporting (`ok`, `degraded`, `failed`)
+- **Opt-in audio retention** — automatically purges old raw WAV recordings (`MEETCAP_RETENTION_DAYS`) only after verifying a complete transcript exists
+- **Obsidian vault export** — atomic `.partial` note and sidecar writing with frontmatter health metadata, collision-safe suffixes
+- **Desktop controls & indicators** — service-aware daemon, rofi menu with error notifications (rofi is optional), Waybar module (blank-when-idle, recording/transcribing states, CSS blink with `--blink-fallback`), and clean `notify-send` alerts (`-a Meetcap`, ≤ 2 positional arguments)
 
 ---
 
@@ -85,29 +91,64 @@ If you use Meetcap for real work calls, treat the **local machine** and **Obsidi
 
 ### Recording pipeline
 
-1. **Daemon** listens on a user-isolated UNIX socket (`$XDG_RUNTIME_DIR/meetcap/meetcap.sock`, mode 0700) with socket timeouts and single-instance protection
-2. **ffmpeg** captures dual-channel WAV from PipeWire sources (default mic + system monitor) under process supervision and collision-safe naming (`-1`, `-2` suffix)
-3. **faster-whisper** transcribes the WAV locally with GPU acceleration
-4. **export_to_vault.py** kicks in automatically after transcription
+1. **Daemon** listens on a user-isolated UNIX socket (`$XDG_RUNTIME_DIR/meetcap/meetcap.sock`, mode 0700) with socket timeouts, single-instance `flock` protection, and desktop alerts via `notify-send -a Meetcap` (strictly ≤ 2 positional arguments)
+2. **Preflight check** validates available disk space against `MEETCAP_MIN_FREE_GB` (default 2.0 GB) before capture starts
+3. **ffmpeg** captures dual-channel WAV from PipeWire sources (default mic + system monitor) under process supervision, monotonic elapsed tracking, and collision-safe naming (`-n`, `-1`, `-2` suffix)
+4. **faster-whisper** transcribes the WAV locally with GPU acceleration, aggregating pauses < 0.5s into natural sentence/turn spans (`src/transcript_segments.py`)
+5. **Durable export queue** manages background export jobs with retries, status reporting (`exporting`, `last_export`), and startup reconciliation in `$XDG_RUNTIME_DIR/meetcap/export_jobs.json`
+6. **export_to_vault.py** executes the export pipeline, publishing the note and sidecars atomically, and reporting explicit stage health and outcome (`ok`, `degraded`, `failed`)
 
 ### Export pipeline
 
-The exporter (`src/exporter/`) is a standalone module that transforms a raw transcript into a rich Obsidian note:
+The exporter (`src/exporter/`) is a modular pipeline that transforms a raw transcript into a rich Obsidian note and machine-readable sidecars:
 
 | Module | Responsibility |
 |--------|---------------|
-| `transcript_parser.py` | Parse meetcap `.txt` transcripts, extract metadata (date, duration, model, language) |
-| `summarizer.py` | Generate AI summary with chunking for long meetings (split → summarize chunks → hierarchical merge) |
-| `task_extractor.py` | Compare transcript against Obsidian daily tasks locally (only meeting content goes to LLM), produce matched + new task suggestions |
-| `vault_exporter.py` | Assemble final Obsidian note with frontmatter, summary, task suggestions, and transcript (atomic `.partial` write, collision-safe suffixes) |
-| `llm_client.py` | OpenRouter API client (curl-based, no SDK dependency) |
-| `prompts.py` | All LLM prompts (summary, task suggestions, JSON repair) |
-| `config.py` | Paths, model config, token limits |
+| `transcript_parser.py` | Parse meetcap `.txt` transcripts, extract metadata, handle `MM:SS` (minutes > 59) and `H:MM:SS`, and split long meetings into character-budgeted chunks |
+| `transcript_segments.py` | Shared transcript writer: aggregate raw whisper segments across pauses < 0.5s into turn/sentence spans, format `[MM:SS → MM:SS] text` lines |
+| `summarizer.py` | Generate AI summary with bounded parallel chunking (`MEETCAP_EXPORT_MAX_CONCURRENCY`), hierarchical merge, and `SUMMARY_TEMPERATURE = 0.3` |
+| `task_extractor.py` | Compare transcript against Obsidian daily tasks locally (daily context stays on-device), enforce anti-rewording rules, and locally deduplicate against summary action items |
+| `entity_resolver.py` | Resolve canonical entities from vault wiki & glossary; `alias` and `fuzzy` rules auto-apply while `substring` matches are audit-only in `corrections.json` |
+| `claim_extractor.py` | Extract key verbatim claims and mechanically ground them against transcript segments (`exact` vs `fuzzy` match methods in `evidence.json`) |
+| `note_verifier.py` | Advisory QA pass chunked across the full meeting: weighted coverage score, decision gaps, action item gaps (triggering `needs_human_review`), and speaker attribution (`not_assessable`) |
+| `room_manifest.py` | Meeting room manifest routing metadata (`meetcap.room-manifest/1`) and grounded `## Decisões` section (`verified`, `candidate`, `unresolved`) |
+| `vault_exporter.py` | Orchestrate bounded concurrent stages (summary + claims in parallel), assemble note with escaped frontmatter health metadata, and atomically write note & sidecars |
+| `llm_client.py` | OpenRouter API client via `httpx` with timeout budgets and structured output retry specialization (never retries transport/auth/5xx errors without schema) |
+| `prompts.py` | System and user prompts with explicit dictated owner/deadline markers (`(owner unspecified)` / `(deadline unspecified)`) |
+| `config.py` | Paths, model configuration, temperatures, concurrency limits, and feature toggles |
 
-The exporter can also be used standalone:
+### Export outcomes & stage health
+
+The export process evaluates stage health (`summary`, `tasks`, `claims`, `qa`, `manifest`, `artifacts`) and produces an overall outcome:
+- **`ok`**: All stages completed successfully.
+- **`degraded`**: Core deliverables succeeded, but advisory stages degraded (e.g. QA verification failed or room manifest could not be built).
+- **`failed`**: The summary failed or a required artifact could not be written. The CLI exits with code != 0.
+
+The daemon inspects the outcome and issues desktop alerts:
+- `"✅ Exported to vault"` on clean completion
+- `"⚠️ Export degraded"` when secondary stages fail
+- `"⚠️ Export failed"` when core export fails
+
+### Standalone CLI usage
+
+Both transcription and vault export can be run standalone without a background daemon:
 
 ```bash
+# Standalone transcription (runs in-process directly on the WAV)
+python3 src/meetcap.py transcribe /path/to/meeting.wav
+# Or via wrapper:
+./meetcap.sh transcribe /path/to/meeting.wav
+
+# Standalone vault export (reads .txt transcript, runs AI pipeline, writes to vault)
 python3 export_to_vault.py /path/to/transcript.txt --title "Custom Title"
+```
+
+To instruct a running daemon to transcribe the most recent recording instead, use:
+
+```bash
+./meetcap.sh transcribe-last
+# Or bare transcribe (no path argument):
+./meetcap.sh transcribe
 ```
 
 ---
@@ -146,7 +187,8 @@ prompt: |
 - **ffmpeg** (for audio recording)
 - **pactl** (PipeWire/PulseAudio CLI — for source detection)
 - **socat** (for the UNIX socket client)
-- **rofi** (for the UI menu — optional, you can also send commands directly)
+- **rofi** (optional UI menu — if missing, `doctor` reports `optional-missing` without degrading system health)
+- **libnotify / notify-send** (desktop notifications, called with `-a Meetcap` and ≤ 2 positional arguments)
 
 ### Python dependencies
 
@@ -154,17 +196,19 @@ prompt: |
 pip install -r requirements.txt
 ```
 
-For development and tests:
+Production dependencies are `faster-whisper` and `httpx`.
+
+For development, testing, and static analysis:
 
 ```bash
 pip install -r requirements-dev.txt
 ```
 
-The only hard dependency is `faster-whisper`. The exporter uses stdlib + `curl` (no additional Python packages).
+The CI workflow runs on GitHub Actions across Python 3.11, 3.12, and 3.13 with 520+ tests, accompanied by a `static` job running `ruff`, `compileall`, `shellcheck`, and `pip-audit`.
 
 ### API keys
 
-- **OpenRouter API key** — for AI summary + task suggestions. Set `OPENROUTER_API_KEY` in your environment or in the repo `.env` (loaded with a strict allowlist via `src/process_env.py`, no eval/shell).
+- **OpenRouter API key** — for AI summary, tasks, claims, QA, and manifest. Set `OPENROUTER_API_KEY` in your environment or in the repo `.env` (loaded with a strict allowlist via `src/process_env.py`, no eval/shell).
 - The LLM model defaults to `qwen/qwen3.7-flash` but is configurable via `MEETCAP_LLM_MODEL`.
 
 ---
@@ -197,6 +241,15 @@ export MEETCAP_LLM_MODEL="qwen/qwen3.7-flash"
 
 # Optional: Obsidian vault path (defaults to ~/vault)
 export OBSIDIAN_VAULT_PATH="/path/to/your/vault"
+
+# Optional: Retention / Disk budget for raw WAV recordings (#36)
+# Purge WAVs older than N days if transcript is complete (default 0 = disabled)
+export MEETCAP_RETENTION_DAYS="0"
+# Minimum free disk space in GB required to start recording (default 2.0)
+export MEETCAP_MIN_FREE_GB="2.0"
+
+# Optional: Export concurrency for chunk summarization and claims extraction (default 2, max 4)
+export MEETCAP_EXPORT_MAX_CONCURRENCY="2"
 
 # Optional: custom runtime directory (defaults to $XDG_RUNTIME_DIR/meetcap)
 # export MEETCAP_RUNTIME_DIR="/run/user/1000/meetcap"
@@ -245,36 +298,47 @@ systemctl --user enable --now meetcap
 
 Runtime artifacts (socket, PID, state, and logs) are isolated per user under `MEETCAP_RUNTIME_DIR` > `$XDG_RUNTIME_DIR/meetcap` > `/run/user/<uid>/meetcap` with `0700` permissions.
 
-The CLI is service-aware: when the systemd user service is installed, `start`/`restart` go through `systemctl --user`; otherwise the daemon is spawned manually (logged to `$XDG_RUNTIME_DIR/meetcap/meetcap-daemon.log`). Socket operations enforce timeouts (#19) and single-instance protection (#28) prevents split-brain daemons. Recording is actively supervised (#11): a background watcher monitors ffmpeg liveness, cleans state, records `last_error`, and sends desktop alerts on unexpected failure.
+The CLI is service-aware: when the systemd user service is installed, `start`/`restart` go through `systemctl --user`; otherwise the daemon is spawned manually (logged to `$XDG_RUNTIME_DIR/meetcap/meetcap-daemon.log`). Socket operations enforce timeouts (#19) and single-instance protection via file locking (`flock`) (#28) prevents split-brain daemons. Recording is actively supervised (#11): a background watcher monitors ffmpeg liveness, cleans state, records `last_error`, and sends desktop alerts on unexpected failure.
+
+Durable export jobs are queued in `$XDG_RUNTIME_DIR/meetcap/export_jobs.json` with bounded retries (#16). The daemon tracks export lifecycle, exposing `"exporting": bool` and `"last_export": {"transcript": ..., "status": ...}` in its status payload, and automatically reconciles pending jobs on startup.
 
 ```bash
-./meetcap.sh status    # ping + pid + state (including recording_since) + how managed
+./meetcap.sh status    # ping + pid + state (including recording_since, exporting, last_export)
 ./meetcap.sh start     # start via service (or manual spawn), waits for the socket
 ./meetcap.sh restart   # restart via service (or stop + clean + respawn)
 ./meetcap.sh doctor    # diagnose: healthy / stale socket / stale PID / wedged daemon
-                        #   / missing service / missing deps / invalid audio source
+                        #   / missing service / missing deps (rofi is optional-missing)
 ./meetcap.sh doctor --fix   # clean stale socket/PID files, then re-diagnose
 ./meetcap.sh doctor --json  # machine-readable diagnosis
 ```
 
 The rofi menu also self-heals: if the daemon does not respond, it offers 🔄 Restart daemon or 🏥 Run doctor instead of dead-ending.
 
-### 4. Bind rofi menu to a key (Hyprland example)
+### 4. Desktop integration (Rofi & Waybar)
+
+#### Rofi menu
+Bind to a hotkey (Hyprland example):
 
 ```ini
 # ~/.config/hypr/hyprland.conf
 bind = SUPER, M, exec, /path/to/rofi-meetcap.sh
 ```
 
-The rofi menu adapts to state and surfaces daemon errors via desktop notifications (#27):
+The rofi menu adapts to state and surfaces daemon errors via desktop notifications (`notify-send -a Meetcap`):
 
 | State | Options |
 |-------|---------|
 | Idle | 🎙 Start Recording · 📝 Transcribe Last · 📂 Open Recordings |
-| Recording | ⏹ Stop Recording · 📝 Transcribe Last · 📂 Open Recordings |
-| Transcribing | 🎙 Start Recording (queued) · 📂 Open Recordings · ⏳ Transcribing... |
+| Recording | ⏹ Stop & Save · 🗑 Discard Recording · 📂 Open Recordings |
+| Transcribing | 🎙 Start Recording · 📂 Open Recordings · ⏳ Transcribing... |
 
-For Waybar, `waybar-meetcap.py` provides a recording indicator with elapsed time (see `docs/examples/waybar-meetcap.jsonc`).
+#### Waybar indicator
+`waybar-meetcap.py` queries daemon status over the UNIX socket and emits a JSON block for Waybar:
+- **Blank when idle**: outputs empty text and tooltip when idle or unreachable, preventing "ghost tooltips" over invisible modules.
+- **Recording state**: displays `🎙 MM:SS` (or `H:MM:SS`) with CSS class `recording`. Blinking is driven by CSS animation keyframes; the `--blink-fallback` flag alternates `🔴`/`⚪` glyphs for setups without CSS blink.
+- **Transcribing state**: displays `📝` with CSS class `transcribing`.
+
+See `docs/examples/waybar-meetcap.jsonc` for a complete Waybar configuration snippet and CSS styles.
 
 ### 5. Use standalone (no daemon)
 
@@ -299,15 +363,20 @@ ffmpeg -f pulse -i "default_input" -f pulse -i "default_output.monitor" \
 .venv/bin/python -m pytest tests/ -v
 ```
 
-The test suite includes 300+ tests covering core business logic and a real lifecycle/IPC daemon integration suite (#41):
+The test suite includes 520+ tests (523 tests in main suite) covering core business logic, edge cases, and real lifecycle/IPC daemon integration:
 
-- `task_extractor`: pending task extraction, local conservative matching (daily tasks stay local), suggestion rendering
-- `transcript_parser`: chunking of long transcripts (order preservation, character limits)
-- `summarizer`: multi-round chunk pipeline (split → reduce → merge) with mocked OpenRouter
-- `vault_exporter`: note rendering, atomic write via `.partial` + `os.replace`, collision handling
-- `llm_client`: transport/HTTP/response failure classification, retry decisions (httpx mocked)
-- `doctor`: health classification (stale socket/PID, wedged daemon, missing deps, invalid source)
-- `meetcap` daemon & integration: command handling, socket timeouts, single-instance lock, recording supervision, and real IPC lifecycle
+- `task_extractor`: daily task matching (local context only), anti-rewording against summary action items, and local deduplication
+- `transcript_parser` & `transcript_segments`: chunking under character budgets, pause aggregation (<0.5s into sentence/turn spans), and resilient timestamp parsing (`MM:SS` with minutes > 59 and `H:MM:SS`)
+- `summarizer`: bounded parallel chunking (`MEETCAP_EXPORT_MAX_CONCURRENCY`), hierarchical merge, and `SUMMARY_TEMPERATURE = 0.3`
+- `entity_resolver`: canonical entity resolution from vault wiki & glossary; `alias` and `fuzzy` rules auto-applied while `substring` matches are audit-only
+- `claim_extractor`: verbatim claim extraction and mechanical grounding against transcript segments (`exact` vs `fuzzy` match methods in `evidence.json`)
+- `note_verifier`: full-meeting chunked QA verification, length-weighted coverage scoring, decision gaps, action item gaps (triggering `needs_human_review`), and speaker attribution (`not_assessable`, no diarization)
+- `room_manifest`: room routing manifest and grounded decisions section (`verified` with timestamps, `candidate`, `unresolved` with `[unverified]`)
+- `vault_exporter`: stages tracking, outcome evaluation (`ok`, `degraded`, `failed`), atomic staged `.partial` writes, and escaped YAML frontmatter with health metadata
+- `llm_client`: `httpx` client with connection timeouts, failure classification, and retry without `response_format` restricted strictly to structured output failures
+- `retention`: opt-in `MEETCAP_RETENTION_DAYS` purging only WAVs with complete transcripts, and `MEETCAP_MIN_FREE_GB` preflight space checks
+- `doctor`: health classification (stale socket/PID, wedged daemon, missing deps, and rofi as `optional-missing`)
+- `meetcap` daemon & integration: socket timeouts, single-instance `flock`, ffmpeg supervision, durable export jobs queue and retries, standalone `transcribe <wav>` vs daemon `transcribe-last`, and desktop alerts via `notify-send -a Meetcap`
 
 ---
 
@@ -316,27 +385,33 @@ The test suite includes 300+ tests covering core business logic and a real lifec
 ```
 meetcap/
 ├── src/
-│   ├── meetcap.py              # Daemon: recording + transcription + socket server
+│   ├── meetcap.py              # Daemon: recording + transcription + socket server + export worker
 │   ├── runtime_paths.py        # User-isolated runtime paths (socket, PID, state, log)
 │   ├── process_env.py          # Safe environment loader with strict allowlist
-│   └── exporter/               # Export pipeline (transcript → Obsidian note)
-│       ├── config.py           # Paths, model config, token limits
-│       ├── prompts.py          # All LLM prompts
-│       ├── llm_client.py       # OpenRouter API client (curl-based)
-│       ├── transcript_parser.py # Transcript parsing + chunking
-│       ├── summarizer.py       # AI summary generation with hierarchical merge
-│       ├── task_extractor.py   # Daily task matching + suggestion generation
-│       └── vault_exporter.py   # Final note assembly + vault write
-├── tests/                      # 300+ tests (unit + daemon lifecycle/IPC integration)
+│   ├── transcript_segments.py  # Segment aggregation (<0.5s) + timestamp parser/formatter
+│   └── exporter/               # Export pipeline (transcript → Obsidian note + sidecars)
+│       ├── config.py           # Paths, model config, temperatures, concurrency limits
+│       ├── prompts.py          # LLM prompts with dictated owner/deadline markers
+│       ├── llm_client.py       # OpenRouter API client (httpx, structured output retry)
+│       ├── transcript_parser.py # Transcript parsing + chunking (MM:SS >59m, H:MM:SS)
+│       ├── summarizer.py       # AI summary with bounded parallel chunking (T=0.3)
+│       ├── task_extractor.py   # Daily task matching, anti-rewording + local dedup
+│       ├── entity_resolver.py  # Canonical entity resolution (alias/fuzzy, substring audit-only)
+│       ├── claim_extractor.py  # Verbatim claim extraction & exact/fuzzy grounding
+│       ├── note_verifier.py    # Advisory chunked QA verifier & mechanical grounding
+│       ├── room_manifest.py    # Meeting room manifest & grounded decisions block
+│       └── vault_exporter.py   # Final note assembly, frontmatter health, atomic write
+├── tests/                      # 520+ tests (unit + lifecycle/IPC integration)
 ├── docs/
 │   ├── examples/               # Desktop indicator configs (waybar-meetcap.jsonc)
-│   └── feature-ideas/          # Roadmap docs (entity resolution, retention, etc.)
+│   ├── feature-ideas/          # Architectural reference & roadmap docs
+│   └── plans/                  # Sprint implementation plans and baselines
 ├── export_to_vault.py          # CLI entry point for standalone export
 ├── meetcap.sh                  # CLI wrapper for the daemon
 ├── meetcap.service             # Portable systemd user service file (%h)
 ├── rofi-meetcap.sh             # rofi menu script with error notifications
-├── waybar-meetcap.py           # Waybar recording indicator with elapsed time
-└── requirements.txt            # Python deps (just faster-whisper)
+├── waybar-meetcap.py           # Waybar indicator (blank-when-idle, recording, transcribing)
+└── requirements.txt            # Python dependencies (faster-whisper, httpx)
 ```
 
 ---
@@ -351,13 +426,19 @@ meetcap/
 | `MEETCAP_COMPUTE` | `float16` | Compute type (`float16`, `float32`, `int8`) |
 | `MEETCAP_LLM_MODEL` | `qwen/qwen3.7-flash` | LLM model for summary + tasks |
 | `OBSIDIAN_VAULT_PATH` | `~/vault` | Path to your Obsidian vault |
-| `MEETCAP_RUNTIME_DIR` | `$XDG_RUNTIME_DIR/meetcap` | User-isolated directory for socket, PID, state, and log |
+| `MEETCAP_RUNTIME_DIR` | `$XDG_RUNTIME_DIR/meetcap` | User-isolated directory for socket, PID, state, and logs |
+| `MEETCAP_RETENTION_DAYS` | `0` | Opt-in retention: purge WAVs older than N days with complete transcripts (`0` = disabled) |
+| `MEETCAP_MIN_FREE_GB` | `2.0` | Minimum free disk space in GB required to start recording |
+| `MEETCAP_EXPORT_MAX_CONCURRENCY` | `2` | Max concurrent worker threads for chunk summarization and claims extraction (1–4) |
+| `MEETCAP_SOCKET_TIMEOUT` | `2.0` | Socket read/write timeout in seconds |
+| `MEETCAP_EXPORT_QA` | `1` | Enable/disable advisory QA verification pass (`0` to disable) |
+| `MEETCAP_EXPORT_MANIFEST` | `1` | Enable/disable room routing manifest generation (`0` to disable) |
 
 ---
 
 ## 📝 Generated note format
 
-Each meeting produces an Obsidian note with YAML frontmatter:
+Each meeting produces an Obsidian note with deterministically escaped YAML frontmatter:
 
 ```markdown
 ---
@@ -369,6 +450,11 @@ tags: [meeting, meeting-notes, meetcap]
 model: "large-v3-turbo (cuda/float16)"
 language: "pt (99.9%)"
 created: "2026-05-20 16:35"
+qa_needs_review: false
+qa_coverage_score: 0.85
+outcome: "ok"
+qa_audited: "post-entity-resolution"
+entity_corrections_count: 1
 ---
 
 # Meeting — 2026-05-20 (29 min)
@@ -380,7 +466,8 @@ created: "2026-05-20 16:35"
 - ...
 
 ## ✅ Action Items
-- [ ] ...
+- [ ] Finalizar contrato da API (owner: Alice) (deadline: sexta-feira)
+- [ ] Revisar cobertura de testes (owner unspecified) (deadline unspecified)
 
 ## ⚠️ Open Questions / Risks
 - ...
@@ -392,28 +479,33 @@ created: "2026-05-20 16:35"
 ### 🆕 Novas tarefas sugeridas pela reunião
 - [ ] ...
 
+## Decisões
+- Migrar pipeline para PipeWire amerge (at 04:12)
+- Manter modelo whisper local em float16
+- Adotar nova política de retenção [unverified]
+
 ## 🔎 Claims & Evidence
-- **Claim:** ...
-  - Why it matters: ...
-  - Evidence: 00:12, 00:18
+- **Claim:** Migração para PipeWire reduziu latência de captura
+  - Why it matters: Valida estabilidade do serviço de gravação
+  - Evidence: 04:12, 04:18
   - Confidence: high
 
 ## Name Corrections
 - `TechKeyon` -> `Project Tachyon` (high confidence, alias)
 
 ## 🚩 QA Flags
-- Coverage score: 0.42
-- Needs review: yes
-- Missing decisions: 1
-- Action item gaps: 2
-- Attribution risks: 0
-- Unsupported claims: 1
+- Coverage score: 0.85
+- Needs review: no
+- Missing decisions: 0
+- Action item gaps: 0
+- Speaker attribution: not_assessable:no-diarization
+- Unsupported claims: 0
 
 ## 🗺️ Room Manifest
 - Authority mix: decision-heavy
 - Freshness: same-day
 - Best used for: task carry-over, wiki update
-- Decisions: 2 · Open questions: 1 · Actions: 3
+- Decisions: 2 · Open questions: 1 · Actions: 2
 
 ## 📝 Transcrição Completa
 [00:00 → 00:05] ...
@@ -421,35 +513,44 @@ created: "2026-05-20 16:35"
 
 ### Export sidecar artifacts
 
-Each export also writes machine-readable sidecars under `Meetings/.meetcap/<note>/`:
+Each export also writes machine-readable sidecars under `Meetings/.meetcap/<meeting-stem>/`:
 
-- `evidence.json` — schema `meetcap.evidence/1`: verified claims with real transcript timestamps, dropped-claim count, model metadata
-- `corrections.json` — schema `meetcap.corrections/1`: entity-resolver audit trail (surface, canonical, confidence, rule)
-- `verification.json` / `verification.md` — schema `meetcap.verification/1`: QA pass results (coverage score, decision/action gaps, attribution risks, unsupported claims)
+- `evidence.json` — schema `meetcap.evidence/1`: verbatim claims grounded against transcript segments, with `match_method` (`exact` or `fuzzy`), verified timestamps, dropped-claim count, and model metadata
+- `corrections.json` — schema `meetcap.corrections/1`: entity-resolver audit trail (surface, canonical, confidence, rule). High-confidence `alias` and `fuzzy` matches auto-apply to derived text (summary and task suggestions); `substring` matches are kept **audit-only** in this sidecar to avoid shrinking valid multi-word names
+- `verification.json` / `verification.md` — schema `meetcap.verification/1`: advisory QA pass results chunked across the full meeting (length-weighted coverage score, decision gaps, action item gaps triggering `needs_human_review`, unsupported claims, and `speaker_attribution: "not_assessable:no-diarization"`)
 - `room_manifest.json` — schema `meetcap.room-manifest/1`: routing metadata for downstream agents (authority mix, freshness, decisions, open questions, actions, missing proof, downstream lanes)
 
-The entity resolver builds its canonical vocabulary from `vault/wiki/entities/` and `vault/wiki/concepts/` slugs, an optional `docs/glossary.txt` (one term per line, or `alias = Canonical`) or `docs/glossary.json` (`{"terms": [...], "aliases": {...}}`), plus explicit participant names. Only high-confidence corrections rewrite derived surfaces (summary + task suggestions); medium-confidence matches are flagged, never applied. The raw transcript is never modified.
+The entity resolver builds its canonical vocabulary from `vault/wiki/entities/` and `vault/wiki/concepts/` slugs, an optional `docs/glossary.txt` (one term per line, or `alias = Canonical`) or `docs/glossary.json` (`{"terms": [...], "aliases": {...}}`), plus explicit participant names. The raw transcript is never modified.
 
-Exports are atomic and collision-safe: notes and sidecars are written via `.partial` staging files before `os.replace`. Name collisions generate numeric suffixes (`-1`, `-2`) without overwriting existing notes, and any artifact failure marks `success=false` in the export result.
+Exports are atomic, collision-safe, and durable: notes and sidecars are written via `.partial` staging files before atomic rename (`os.replace`). Name collisions generate numeric suffixes (`-1`, `-2`) without overwriting existing notes. Durable export jobs in `export_jobs.json` track retries and status (`exporting`, `last_export`), while stage health determines the outcome (`ok`, `degraded`, `failed`), exiting with code != 0 on failure.
 
 ### QA verification pass
 
-After building the note, an advisory QA pass (`note_verifier`) judges it against the timestamped transcript: coverage score (0–1), missing decisions, action-item gaps, speaker attribution risks, and unsupported claims — each pointing back to the timestamps where the gap occurred. It never blocks or rewrites the export; risky notes get a compact `## 🚩 QA Flags` block and full details land in `verification.json`/`verification.md`. Disable with `MEETCAP_EXPORT_QA=0`.
+After building the note, an advisory QA pass (`note_verifier`) evaluates the note against the timestamped transcript: coverage score (0–1), missing decisions, action-item gaps, speaker attribution risks, and unsupported claims. Long transcripts are processed in chunks and aggregated deterministically (weighted coverage average and union of gaps). Timestamps are mechanically grounded against real segments—ungrounded or out-of-bounds timestamps are never presented as verified evidence. If `action_item_gaps` or other gaps are detected, `needs_human_review` is set to `true`. Speaker attribution is explicitly marked `not_assessable` because Meetcap does not implement diarization. Risky notes receive a compact `## 🚩 QA Flags` block and full details land in `verification.json`/`verification.md`. Disable with `MEETCAP_EXPORT_QA=0`.
 
-### Room manifest
+### Room manifest & decisions
 
-Each export also emits a routing manifest (`room_manifest.json` + a compact `## 🗺️ Room Manifest` note block) for downstream agents (Hermes). It reuses the evidence claims and QA verification instead of re-deriving them: authority mix (decision-heavy / discussion-heavy / mixed), freshness (same-day / aging / stale-follow-up), decisions, open questions, checkbox actions, missing proof, and suggested downstream lanes (`daily-tasks`, `wiki`, `content`, `client-followup`, `reference-only`). Low-confidence material (poor QA coverage and no decisions) routes to `reference-only` only. Disable with `MEETCAP_EXPORT_MANIFEST=0`.
+Each export also emits a routing manifest (`room_manifest.json` + a compact `## 🗺️ Room Manifest` note block) and a grounded `## Decisões` section for downstream agents (Hermes). It reuses the evidence claims and QA verification instead of re-deriving them: authority mix (decision-heavy / discussion-heavy / mixed), freshness (same-day / aging / stale-follow-up), decisions, open questions, checkbox actions, missing proof, and suggested downstream lanes (`daily-tasks`, `wiki`, `content`, `client-followup`, `reference-only`). Decisions are classified into `verified` (rendered with grounded timestamps), `candidate` (rendered without timestamps), or `unresolved` (rendered with `[unverified]`). Disable manifest generation with `MEETCAP_EXPORT_MANIFEST=0`.
 
 ---
 
 ## 🛣️ Roadmap
 
-Feature ideas are tracked in [`docs/feature-ideas/`](docs/feature-ideas/):
+### Delivered in Integrity Epic (Sprint 5)
 
-- **Canonical entity resolution** — resolve speaker names and project references in transcripts
-- **Evidence-linked exports** — link summary points back to transcript timestamps
-- **Project room exporter** — group meeting notes by project/client
-- **Recording retention policy** — auto-cleanup old audio files while keeping transcripts
+- **Canonical entity resolution** — vault wiki & glossary matching (alias/fuzzy auto-applied, substring audit-only)
+- **Evidence-linked exports** — verbatim claim extraction with exact/fuzzy mechanical grounding
+- **Advisory QA pass** — full-meeting chunked verification with mechanical timestamp grounding and `action_item_gaps` triggering human review
+- **Room manifest & grounded decisions** — routing metadata and decision classification (`verified`, `candidate`, `unresolved`)
+- **Durable export queue & health contract** — background retries, startup reconciliation, and `ok`/`degraded`/`failed` outcome handling
+- **Recording retention & disk preflight** — opt-in cleanup of old WAVs (`MEETCAP_RETENTION_DAYS`) requiring complete transcripts, and `MEETCAP_MIN_FREE_GB` preflight space check
+- **Bounded export concurrency** — parallel chunk summarization and claims extraction (`MEETCAP_EXPORT_MAX_CONCURRENCY`)
+- **Desktop indicators & IPC reliability** — blank-when-idle Waybar indicator with CSS blink (`--blink-fallback`), rofi optional support, and safe `notify-send` alerts
+
+### Future Roadmap
+
+- **Speaker diarization** — multi-speaker voice separation and identification (future milestone; speaker attribution is currently not performed and is marked `not_assessable` in QA verification)
+- **Project room bundling** — optional organization of meeting notes and sidecars under per-project vault directories (`vault/Projects/<project>/Meetings/`)
 
 ---
 
