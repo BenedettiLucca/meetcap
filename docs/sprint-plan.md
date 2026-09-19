@@ -1,13 +1,29 @@
 # Meetcap Sprint Plan
 
-## Plano atual — Sprint 5 (proposta, 2026-09-10)
+## Sprint 5: Capture Safety & Data Integrity (Executada — 2026-09)
 
 [Capture Safety & Data Integrity — plano detalhado](plans/2026-09-10-sprint-5-capture-integrity.md)
 
-- Triage das 33 issues abertas; proposta de 15 issues em duas semanas, até três lanes paralelas.
-- AGY Gemini + AGY Claude + OpenCode, ownership por arquivo, contratos RED, gates e handoff para Core GLM 5.3 Flash.
-- Status: aguardando aprovação; nenhuma implementação, commit, push ou alteração do serviço iniciada pelo planejamento.
-- [Baseline e limitações da verificação](plans/2026-09-10-sprint-5-baseline.md).
+- **Status:** **Executada e integrada em `main` (local)** — suíte completa **523 passed** e gates estáticos (ruff/compileall/shellcheck) verificados localmente; CI remota roda no primeiro push.
+- **Entregas integradas do épico de integridade:**
+  - **Runtime & Lifecycle (A):** runtime isolado em `$XDG_RUNTIME_DIR/meetcap`, single-instance via `flock`, verificação de identidade de processos (pidfd/start ticks sem sinais destrutivos), IPC com budgets e deadlines bounded (#13, #18, #19, #28).
+  - **Captura & Liveness (D):** monitoramento ativo do ffmpeg, detecção de crash com marcação `partial`/`failed`, elapsed time monotônico, nomes de WAV resistentes a colisão (`-n`), descarte seguro com confirmação (#11, #33, #42).
+  - **Publicação Atômica & No-Clobber (B):** export via staging `.partial` antes de `os.replace`, nota publicada por último como barreira de commit, sidecars versionados, detecção de colisão sem sobrescrever notas ou edições humanas (#12, #17).
+  - **Privacidade de Tarefas (C):** matching conservador de tarefas do Obsidian executado estritamente local; tarefas da daily note nunca são enviadas ao LLM remoto (#25).
+  - **Serviço & Least Privilege (S):** `meetcap.service` portável com `%h`, sem credenciais reais versionadas; allowlist estrita de variáveis de ambiente para subprocessos (#14).
+  - **Transcrição, Leases & Segmentos (E):** lease exclusiva de transcrição, agregação de segmentos do Whisper para pausas <0.5s em turnos de fala, parse resiliente de timestamps (`MM:SS` com minutos > 59 e `H:MM:SS`), completion markers sem retranscrição implícita (#15, #26, #37).
+  - **CLI Standalone:** comando `python src/meetcap.py transcribe <wav>` standalone in-process sem necessidade de daemon ativo; `transcribe` (sem args) e `transcribe-last` mantidos para o daemon (#29).
+  - **Fila Durável de Exports:** persistência durável em `export_jobs.json` com retry bounded, status `exporting` e `last_export` no daemon, reconciliação automática no startup (#16).
+  - **Contrato de Outcome & Estágios:** status explícito `ok`, `degraded` e `failed` por estágio (`summary`, `tasks`, `claims`, `qa`, `manifest`, `artifacts`); exit != 0 quando summary ou artefatos obrigatórios falham; daemon notifica `Export degraded` (#38).
+  - **Grounding Mecânico & Qualidade Semântica:** QA advisory executado em chunks cobrindo a reunião completa; weighted coverage score; `action_item_gaps` acionando `needs_human_review`; speaker attribution marcada como `not_assessable` sem fingir diarização (#20, #21, #22, #39).
+  - **Evidências & Decisões:** claims com grounding `exact` vs `fuzzy` no `evidence.json`; seção `## Decisões` na nota com categorização `verified` (com timestamps), `candidate` e `unresolved` (`[unverified]`) (#4, #23).
+  - **Resolução Canônica de Entidades:** resolução com wiki e glossário; auto-aplicação restrita a regras `alias` e `fuzzy`; matching por substring tratado como audit-only em `corrections.json` (#2, #53).
+  - **Retenção & Preflight de Disco:** opt-in via `MEETCAP_RETENTION_DAYS` (expurgo restrito a arquivos WAV com transcrição completa, sem nunca apagar textos ou notas); preflight `MEETCAP_MIN_FREE_GB` recusando captura se o disco estiver abaixo do limite (#36).
+  - **Concorrência Bounded:** `MEETCAP_EXPORT_MAX_CONCURRENCY` limitando paralelismo de chunks e claims (1–4, default 2) (#31).
+  - **Desktop & UI (U):** módulo Waybar com blank-when-idle, estados `recording` (`🎙 MM:SS`) e `transcribing` (`📝`), piscar via CSS com `--blink-fallback` opcional; rofi com status sanitizado e classificado como opcional no doctor (`optional-missing`); `notify-send` fixado com app `-a Meetcap` e ≤ 2 posicionais (#27, #32, #42, #44, #46).
+  - **Frontmatter YAML Seguro:** serialização determinística com escape seguro; métricas de saúde no frontmatter (`qa_needs_review`, `qa_coverage_score`, `outcome`, `qa_audited`, `entity_corrections_count`) (#40, #51).
+  - **CI Robusto:** matriz de testes em Python 3.11, 3.12, 3.13 mais job `static` (ruff, compileall, shellcheck, pip-audit) (#3, #35).
+- [Baseline e limitações da verificação histórica](plans/2026-09-10-sprint-5-baseline.md).
 
 ## Histórico — plano original das Sprints 1–4
 
