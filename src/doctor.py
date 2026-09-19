@@ -24,7 +24,10 @@ STATE_FILE = runtime_paths.state_path()
 LOG_PATH = runtime_paths.log_path()
 
 SERVICE_NAME = "meetcap"
-REQUIRED_BINARIES = ("ffmpeg", "pactl", "socat", "rofi")
+REQUIRED_BINARIES = ("ffmpeg", "pactl", "socat")
+OPTIONAL_BINARIES = ("rofi",)
+OPTIONAL = OPTIONAL_BINARIES
+REQUIRED = REQUIRED_BINARIES
 
 # Overall status codes
 HEALTHY = "healthy"
@@ -34,6 +37,7 @@ STALE_SOCKET = "stale_socket"
 STALE_PID = "stale_pid"
 DAEMON_DOWN = "daemon_down"
 INVALID_SOURCE = "invalid_source"
+OPTIONAL_MISSING = "optional-missing"
 
 _MESSAGES = {
     HEALTHY: "Daemon is healthy",
@@ -90,6 +94,11 @@ def pid_alive(pid):
 
 def check_binaries(names=REQUIRED_BINARIES):
     """Return the list of required binaries that are not on PATH."""
+    return [name for name in names if shutil.which(name) is None]
+
+
+def check_optional_binaries(names=OPTIONAL_BINARIES):
+    """Return the list of optional binaries that are not on PATH."""
     return [name for name in names if shutil.which(name) is None]
 
 
@@ -192,6 +201,7 @@ def _action(status, svc):
 
 
 def diagnose(socket_path=None, pid_file=None, *, binaries=REQUIRED_BINARIES,
+             optional_binaries=OPTIONAL_BINARIES,
              service=SERVICE_NAME, sources=None):
     """Run all checks and return a diagnosis dict with a recovery action."""
     if socket_path is None:
@@ -204,6 +214,7 @@ def diagnose(socket_path=None, pid_file=None, *, binaries=REQUIRED_BINARIES,
     pid = read_pid(pid_file)
     pid_ok = pid_alive(pid)
     missing = check_binaries(binaries)
+    opt_missing = check_optional_binaries(optional_binaries)
     svc = check_service(service)
     if sources is None:
         sources = check_audio_sources()
@@ -215,6 +226,8 @@ def diagnose(socket_path=None, pid_file=None, *, binaries=REQUIRED_BINARIES,
     elif status == INVALID_SOURCE and sources.get("detail"):
         message += " — " + sources["detail"]
 
+    opt_status = OPTIONAL_MISSING if opt_missing else "ok"
+
     return {
         "status": status,
         "message": message,
@@ -223,7 +236,15 @@ def diagnose(socket_path=None, pid_file=None, *, binaries=REQUIRED_BINARIES,
             "socket": {"exists": socket_exists, "responsive": socket_ok},
             "pid": {"file_exists": Path(pid_file).exists(), "pid": pid, "alive": pid_ok},
             "service": svc,
-            "binaries": {"missing": missing},
+            "binaries": {
+                "missing": missing,
+                "optional_missing": opt_missing,
+                "optional_status": opt_status,
+            },
+            "optional_binaries": {
+                "missing": opt_missing,
+                "status": opt_status,
+            },
             "audio_sources": sources,
         },
     }
@@ -246,6 +267,14 @@ def format_report(diagnosis):
         f"  service: installed={svc['installed']} enabled={svc['enabled']} active={svc['active']}"
     )
     lines.append(f"  missing binaries: {', '.join(checks['binaries']['missing']) or 'none'}")
+    opt = checks.get("optional_binaries")
+    if opt is not None:
+        opt_missing = opt.get("missing", [])
+        opt_status = opt.get("status", OPTIONAL_MISSING if opt_missing else "ok")
+        if opt_missing:
+            lines.append(f"  optional binaries: {opt_status} ({', '.join(opt_missing)})")
+        else:
+            lines.append(f"  optional binaries: {opt_status}")
     src = checks["audio_sources"]
     if src.get("ok") is None:
         state = "unknown"

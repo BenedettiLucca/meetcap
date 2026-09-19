@@ -105,6 +105,14 @@ class CheckBinariesTests(unittest.TestCase):
     def test_missing_binary_reported(self):
         self.assertEqual(doctor.check_binaries(("meetcap-no-such-bin",)), ["meetcap-no-such-bin"])
 
+    def test_rofi_is_optional_not_required(self):
+        self.assertNotIn("rofi", doctor.REQUIRED_BINARIES)
+        self.assertIn("rofi", doctor.OPTIONAL_BINARIES)
+        self.assertEqual(doctor.OPTIONAL_MISSING, "optional-missing")
+
+    def test_check_optional_binaries_reports_missing(self):
+        self.assertEqual(doctor.check_optional_binaries(("meetcap-no-such-bin",)), ["meetcap-no-such-bin"])
+
 
 class CheckServiceTests(unittest.TestCase):
     def test_installed_enabled_active(self):
@@ -177,13 +185,14 @@ class DiagnoseTests(unittest.TestCase):
         self.pid_file = Path(self.tmp.name) / "meetcap.pid"
         self.svc_installed = {"installed": True, "enabled": True, "active": True}
 
-    def _diagnose(self, *, ping=False, alive=False, missing=(), svc=None,
-                  sources=HEALTHY_SOURCES):
+    def _diagnose(self, *, ping=False, alive=False, missing=(), optional_missing=(),
+                  svc=None, sources=HEALTHY_SOURCES):
         if svc is None:
             svc = self.svc_installed
         with patch("doctor.ping_socket", return_value=ping), \
              patch("doctor.pid_alive", return_value=alive), \
              patch("doctor.check_binaries", return_value=list(missing)), \
+             patch("doctor.check_optional_binaries", return_value=list(optional_missing)), \
              patch("doctor.check_service", return_value=svc), \
              patch("doctor.check_audio_sources", return_value=sources):
             return doctor.diagnose(self.sock_path, self.pid_file)
@@ -248,6 +257,24 @@ class DiagnoseTests(unittest.TestCase):
         self.assertIn("ffmpeg", d["message"])
         self.assertIn("socat", d["message"])
 
+    def test_optional_missing_does_not_degrade_health(self):
+        self.sock_path.touch()
+        d = self._diagnose(ping=True, optional_missing=["rofi"])
+        self.assertEqual(d["status"], doctor.HEALTHY)
+        self.assertEqual(d["action"], "")
+        checks = d["checks"]
+        self.assertEqual(checks["binaries"]["missing"], [])
+        self.assertEqual(checks["binaries"]["optional_missing"], ["rofi"])
+        self.assertEqual(checks["optional_binaries"]["missing"], ["rofi"])
+        self.assertEqual(checks["optional_binaries"]["status"], "optional-missing")
+
+    def test_optional_missing_with_required_missing_keeps_missing_deps(self):
+        self.sock_path.touch()
+        d = self._diagnose(ping=True, missing=["ffmpeg"], optional_missing=["rofi"])
+        self.assertEqual(d["status"], doctor.MISSING_DEPS)
+        self.assertEqual(d["checks"]["binaries"]["missing"], ["ffmpeg"])
+        self.assertEqual(d["checks"]["optional_binaries"]["missing"], ["rofi"])
+
     def test_checks_section_reports_raw_findings(self):
         self.pid_file.write_text("123")
         d = self._diagnose()
@@ -255,6 +282,9 @@ class DiagnoseTests(unittest.TestCase):
         self.assertEqual(checks["pid"]["pid"], 123)
         self.assertFalse(checks["socket"]["exists"])
         self.assertEqual(checks["binaries"]["missing"], [])
+        self.assertEqual(checks["binaries"]["optional_missing"], [])
+        self.assertEqual(checks["optional_binaries"]["missing"], [])
+        self.assertEqual(checks["optional_binaries"]["status"], "ok")
         self.assertEqual(checks["service"], self.svc_installed)
 
 
@@ -319,6 +349,13 @@ class FormatReportTests(unittest.TestCase):
         self.assertIn("audio sources: invalid", report)
         self.assertIn("Sources not present: x", report)
 
+    def test_optional_missing_rendered_in_report(self):
+        d = self._diagnosis(status=doctor.HEALTHY)
+        d["message"] = "Daemon is healthy"
+        d["checks"]["optional_binaries"] = {"missing": ["rofi"], "status": "optional-missing"}
+        report = doctor.format_report(d)
+        self.assertIn("optional binaries: optional-missing (rofi)", report)
+
 
 class BootstrapCliTests(unittest.TestCase):
     @staticmethod
@@ -351,6 +388,29 @@ class BootstrapCliTests(unittest.TestCase):
                 self.assertEqual(e.code, 0)
         payload = json.loads(printed[0])
         self.assertEqual(payload["status"], "healthy")
+
+    def test_doctor_json_output_exits_zero_when_optional_missing(self):
+        diagnosis = {
+            "status": doctor.HEALTHY, "message": "Daemon is healthy", "action": "",
+            "checks": {
+                "socket": {"exists": True, "responsive": True},
+                "pid": {"file_exists": True, "pid": 1, "alive": True},
+                "service": {"installed": True, "enabled": True, "active": True},
+                "binaries": {"missing": [], "optional_missing": ["rofi"]},
+                "optional_binaries": {"missing": ["rofi"], "status": "optional-missing"},
+                "audio_sources": dict(HEALTHY_SOURCES),
+            },
+        }
+        printed = []
+        with patch("meetcap.doctor.diagnose", return_value=diagnosis), \
+             patch("builtins.print", side_effect=printed.append):
+            try:
+                meetcap.doctor_cmd(["--json"])
+            except SystemExit as e:
+                self.assertEqual(e.code, 0)
+        payload = json.loads(printed[0])
+        self.assertEqual(payload["status"], "healthy")
+        self.assertEqual(payload["checks"]["optional_binaries"]["status"], "optional-missing")
 
     def test_doctor_fix_cleans_stale_files_then_rechecks(self):
         stale = {"status": doctor.STALE_SOCKET, "message": "stale", "action": "a",
