@@ -109,6 +109,24 @@ class VerifyExportTests(unittest.TestCase):
         self.assertIn("Action item gaps: 1", block)
         self.assertIn("Needs review: yes", block)
 
+    def test_speaker_attribution_risks_do_not_trigger_review_and_marked_not_assessable(self):
+        payload = (
+            '{"coverage_score": 0.9, "decision_gaps": [], '
+            '"action_item_gaps": [], '
+            '"speaker_attribution_risks": [{"item": "maria proposal misattributed", "timestamps": ["00:31"]}], '
+            '"unsupported_claims": [], '
+            '"recommended_note_additions": []}'
+        )
+        with patch.object(note_verifier, "call_openrouter", return_value=payload):
+            result = verify_export(SEGMENTS, "note", "tasks")
+        self.assertFalse(result["needs_human_review"])
+        self.assertEqual(result["speaker_attribution"], "not_assessable:no-diarization")
+        self.assertEqual(len(result["speaker_attribution_risks"]), 1)
+        self.assertIn("[not_assessable]", result["speaker_attribution_risks"][0])
+        block = render_qa_block(result)
+        self.assertEqual(block, "")
+
+
     def test_chunked_verification_audits_full_transcript_with_weighted_coverage_and_gap_union(self):
         segments = []
         for i in range(20):
@@ -185,6 +203,20 @@ class RenderQaBlockTests(unittest.TestCase):
         self.assertIn("Coverage score: 0.42", block)
         self.assertIn("Missing decisions: 1", block)
         self.assertIn("Needs review: yes", block)
+
+    def test_render_qa_block_explains_attribution_not_assessable_without_fabricating_risks(self):
+        verification = {
+            "coverage_score": 0.42, "needs_human_review": True, "error": None,
+            "decision_gaps": ["g1"], "action_item_gaps": [],
+            "speaker_attribution_risks": ["s1 [not_assessable]"],
+            "speaker_attribution": "not_assessable:no-diarization",
+            "unsupported_claims": [],
+        }
+        block = render_qa_block(verification)
+        self.assertIn("## 🚩 QA Flags", block)
+        self.assertNotIn("Attribution risks:", block)
+        self.assertIn("- Speaker attribution: not assessable (no diarization)", block)
+
 
 
 class RenderVerificationMdTests(unittest.TestCase):
@@ -307,6 +339,24 @@ class GroundingTests(unittest.TestCase):
         self.assertEqual(normalized["decision_gaps"], ["gap (at 00:12)"])
         self.assertEqual(normalized["evidence_grounding"], [])
 
+    def test_speaker_attribution_items_grounded_as_not_assessable(self):
+        normalized = self._normalize(
+            {"speaker_attribution_risks": [{"item": "risk", "timestamps": ["00:12"]}]}
+        )
+        self.assertEqual(normalized["speaker_attribution_risks"], ["risk (at 00:12) [not_assessable]"])
+        self.assertEqual(normalized["speaker_attribution"], "not_assessable:no-diarization")
+        record = normalized["evidence_grounding"][0]
+        self.assertEqual(record["status"], "not_assessable")
+        self.assertEqual(record["section"], "speaker_attribution_risks")
+
+    def test_speaker_attribution_legacy_call_without_segments_marked_not_assessable(self):
+        normalized = note_verifier.normalize_verification_payload(
+            {"speaker_attribution_risks": ["plain risk"]}
+        )
+        self.assertEqual(normalized["speaker_attribution_risks"], ["plain risk [not_assessable]"])
+        self.assertEqual(normalized["speaker_attribution"], "not_assessable:no-diarization")
+
+
 
 class GroundedVerifyExportTests(unittest.TestCase):
     def _export(self, payload):
@@ -383,6 +433,20 @@ class ArtifactTests(unittest.TestCase):
             transcript_file="m.wav",
         )
         self.assertEqual(artifact["evidence_grounding"], grounding)
+
+    def test_artifact_records_speaker_attribution_status(self):
+        artifact = build_verification_artifact(
+            {
+                "coverage_score": 0.8,
+                "needs_human_review": False,
+                "error": None,
+                "speaker_attribution": "not_assessable:no-diarization",
+            },
+            meeting_date="2026-08-14",
+            transcript_file="m.wav",
+        )
+        self.assertEqual(artifact["speaker_attribution"], "not_assessable:no-diarization")
+
 
 
 if __name__ == "__main__":
