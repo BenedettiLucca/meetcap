@@ -101,6 +101,9 @@ Important:
 - This is a manual-review workflow, not an auto-planning workflow.
 - Suggest only tasks that the user can copy and paste into "Tasks do Dia".
 - Be conservative: false negatives are better than false positives.
+- Anti-rewording rule: do NOT duplicate, rephrase, or reword action items already present in the meeting summary (especially under `## ✅ Action Items`). Rewriting an existing summary action item with different words, synonyms, or altered grammar as a new task is strictly forbidden.
+- Only suggest GENUINELY NEW tasks: suggest only actionable items mentioned in the meeting that were NOT already captured in the summary's Action Items.
+- Reference already covered items: if an action item was already covered by the summary, do NOT put it in new_suggested_tasks. If mentioned, reference it in not_now_items citing the existing summary action item (e.g. {"item": "Short item", "reason": "já coberto pelo summary: '<short quote>'"} or in the meeting language) or omit it.
 - If something is vague, belongs to someone else, is not an immediate action, or is just context, put it in not_now_items or omit it.
 - Use the same language as the meeting.
 - Keep task wording short, concrete, and actionable.
@@ -133,7 +136,10 @@ Transcript excerpt:
 {transcript_excerpt}
 </untrusted_transcript>
 
-Task again: suggest copy-paste-ready tasks derived from the meeting in json only."""
+Task again: suggest copy-paste-ready tasks derived from the meeting in json only.
+Rules reminder:
+- Do NOT reword or re-suggest action items already present in the summary's Action Items.
+- Only suggest genuinely new tasks. If already covered in the summary, omit or put in not_now_items citing the summary action item."""
 
 JSON_REPAIR_SYSTEM_PROMPT = """You repair malformed json.
 
