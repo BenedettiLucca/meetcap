@@ -182,6 +182,49 @@ class ResolveAndApplyTests(unittest.TestCase):
         self.assertEqual(corrected, "Plain text with no names.")
         self.assertEqual(corrections, [])
 
+    # #53 regressions: substring matches shrink a valid multiword surface
+    # ("Zcash Foundation" -> "Zcash") without proof the extra tokens are
+    # noise, so they must be flagged in the audit and never auto-applied.
+    def test_substring_qualifier_is_preserved(self):
+        text = "Project Tachyon Roadmap was reviewed."
+        corrected, corrections = resolve_derived_surfaces(text, self.vocab)
+        self.assertEqual(corrected, text)
+        substring = [c for c in corrections if c["rule"] == "substring"]
+        self.assertTrue(substring)
+        self.assertTrue(all(not c["auto_applied"] for c in substring))
+
+    def test_zcash_foundation_not_shrunk(self):
+        text = "Zcash Foundation funded the grant."
+        corrected, corrections = resolve_derived_surfaces(text, self.vocab)
+        self.assertIn("Zcash Foundation", corrected)
+        self.assertNotIn("funded the grant.", corrected[:30])
+
+    def test_isolated_token_typo_still_applied(self):
+        text = "Zcasch roadmap was discussed."
+        corrected, corrections = resolve_derived_surfaces(text, self.vocab)
+        self.assertIn("Zcash roadmap was discussed.", corrected)
+        self.assertEqual(corrections[0]["rule"], "fuzzy")
+        self.assertTrue(corrections[0]["auto_applied"])
+
+    def test_mixed_rules_only_non_destructive_applied(self):
+        text = "TechKeyon kickoff with Zcash Foundation."
+        corrected, corrections = resolve_derived_surfaces(text, self.vocab)
+        self.assertEqual(corrected, "Project Tachyon kickoff with Zcash Foundation.")
+        rules = {c["rule"]: c["auto_applied"] for c in corrections}
+        self.assertIn("alias", rules)
+        self.assertIn("substring", rules)
+        self.assertTrue(rules["alias"])
+        self.assertFalse(rules["substring"])
+
+    def test_correction_audit_records_replacement_span(self):
+        _, corrections = resolve_derived_surfaces("We met TechKeyon today.", self.vocab)
+        self.assertEqual(corrections[0]["replacement_span"], "TechKeyon")
+
+    def test_input_text_not_mutated(self):
+        text = "TechKeyon and Project Tachyon Roadmap"
+        resolve_derived_surfaces(text, self.vocab)
+        self.assertEqual(text, "TechKeyon and Project Tachyon Roadmap")
+
 
 class RenderCorrectionsTests(unittest.TestCase):
     def test_empty_renders_nothing(self):

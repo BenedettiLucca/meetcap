@@ -142,6 +142,14 @@ def load_vocabulary(
 
 CANDIDATE_PATTERN = re.compile(r"\b[A-Z][\w’'-]*(?:\s+[A-Z][\w’'-]*)*\b")
 
+# Rules allowed to rewrite derived text automatically (#53). A `substring`
+# match shrinks a valid multiword surface to the canonical name ("Zcash
+# Foundation" -> "Zcash") without proof the extra tokens are noise, so it is
+# audit-only and never auto-applied. `fuzzy` only fires when the whole
+# candidate span scored against the canonical, so the replacement span stays
+# exactly the suspect surface — no surrounding text is consumed.
+AUTO_APPLY_RULES = ("alias", "fuzzy")
+
 
 def extract_candidates(text: str) -> list[str]:
     """Extract suspicious proper-noun surfaces from derived text."""
@@ -229,10 +237,12 @@ def resolve_entities(text: str, vocabulary: dict[str, Any]) -> list[dict[str, An
         confidence, rule, canonical = match
         corrections.append({
             "surface": surface,
+            "replacement_span": surface,
             "canonical": canonical,
             "confidence": round(confidence, 3),
             "rule": rule,
-            "auto_applied": confidence >= ENTITY_HIGH_CONFIDENCE,
+            "auto_applied": confidence >= ENTITY_HIGH_CONFIDENCE
+            and rule in AUTO_APPLY_RULES,
         })
     return corrections
 
