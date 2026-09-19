@@ -35,6 +35,22 @@ def _format_timestamp(seconds: float) -> str:
     return f"{m:02d}:{s:02d}"
 
 
+def parse_timestamp(value: str) -> int:
+    """Inverse of the formatter: 'MM:SS' (total minutes, any width), 'H:MM:SS' -> seconds.
+
+    Two-part values treat the first field as TOTAL minutes, so '100:07' is
+    1h 40m; three-part values are hours:minutes:seconds. Raises ValueError on
+    anything that is not 2 or 3 numeric fields.
+    """
+    parts = value.split(":")
+    if len(parts) not in (2, 3) or not all(p.isdigit() for p in parts):
+        raise ValueError(f"invalid timestamp: {value!r}")
+    total = 0
+    for field in parts:
+        total = total * 60 + int(field)
+    return total
+
+
 def format_transcript_lines(segments: list[dict], gap_s: float = 0.5) -> list[str]:
     """Aggregate segments and emit the `[start → end] text` transcript lines."""
     return [

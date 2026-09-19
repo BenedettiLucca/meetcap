@@ -62,8 +62,9 @@ def split_transcript_into_chunks(transcript_text: str, max_chars: int) -> list[s
 
     return chunks or [transcript_text]
 
+# Timestamp: total-minutes MM:SS (any width, #26) or H:MM:SS; second field padded.
 SEGMENT_PATTERN = re.compile(
-    r"^\[(\d{1,2}:\d{2}(?::\d{2})?)\s*(?:→|->|—|to)\s*(\d{1,2}:\d{2}(?::\d{2})?)\]\s*(.*)$"
+    r"^\[(\d+:\d{2}(?::\d{2})?)\s*(?:→|->|—|to)\s*(\d+:\d{2}(?::\d{2})?)\]\s*(.*)$"
 )
 
 def parse_transcript_segments(transcript_text: str) -> list[dict[str, Any]]:
