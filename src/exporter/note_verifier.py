@@ -110,7 +110,22 @@ def _grounded_item(item: Any, key: str, segments: list[dict[str, Any]]) -> tuple
     never presented as evidence (rendered with an explicit marker instead).
     """
     if not isinstance(item, dict):
-        return _item_to_text(item), None
+        base_text = _item_to_text(item)
+        if not base_text:
+            return "", None
+        if key == "speaker_attribution_risks":
+            text = f"{base_text} [not_assessable]" if not base_text.endswith("[not_assessable]") else base_text
+            record = {
+                "section": key,
+                "status": "not_assessable",
+                "grounded_timestamps": [],
+                "unresolved_timestamps": [],
+                "segment_ids": [],
+                "match_method": None,
+            }
+            return text, record
+        return base_text, None
+
     text = " ".join(str(item.get("item") or item.get("description") or "").split())
     if not text:
         return "", None
@@ -121,6 +136,19 @@ def _grounded_item(item: Any, key: str, segments: list[dict[str, Any]]) -> tuple
     grounded = _ground_timestamps(stamps, segments)
     if grounded["grounded_timestamps"]:
         text = f"{text} (at {', '.join(grounded['grounded_timestamps'])})"
+
+    if key == "speaker_attribution_risks":
+        text = f"{text} [not_assessable]" if not text.endswith("[not_assessable]") else text
+        record = {
+            "section": key,
+            "status": "not_assessable",
+            "grounded_timestamps": grounded["grounded_timestamps"],
+            "unresolved_timestamps": grounded["unresolved_timestamps"],
+            "segment_ids": grounded["segment_ids"],
+            "match_method": grounded["match_method"],
+        }
+        return text, record
+
     if grounded["unresolved_timestamps"] or not stamps:
         text = f"{text} [unresolved evidence]"
     record = {
@@ -153,14 +181,24 @@ def normalize_verification_payload(
     if coverage is not None:
         coverage = min(1.0, max(0.0, coverage))
 
-    normalized: dict[str, Any] = {"coverage_score": coverage}
+    normalized: dict[str, Any] = {
+        "coverage_score": coverage,
+        "speaker_attribution": "not_assessable:no-diarization",
+    }
     grounding_records: list[dict[str, Any]] = []
     for key in _FLAG_KEYS:
         raw = source.get(key, [])
         if not isinstance(raw, list):
             raw = []
         if segments is None:
-            items = [text for text in (_item_to_text(item) for item in raw) if text]
+            if key == "speaker_attribution_risks":
+                items = [
+                    f"{text} [not_assessable]" if not text.endswith("[not_assessable]") else text
+                    for text in (_item_to_text(item) for item in raw)
+                    if text
+                ]
+            else:
+                items = [text for text in (_item_to_text(item) for item in raw) if text]
             normalized[key] = items[:QA_MAX_ITEMS]
             continue
         pairs = [_grounded_item(item, key, segments) for item in raw]
@@ -274,6 +312,7 @@ def verify_export(
         "unsupported_claims": [],
         "recommended_note_additions": [],
         "evidence_grounding": [],
+        "speaker_attribution": "not_assessable:no-diarization",
         "needs_human_review": False,
         "error": None,
     }
@@ -342,9 +381,9 @@ def verify_export(
         below_threshold
         or result["decision_gaps"]
         or result["action_item_gaps"]
-        or result["speaker_attribution_risks"]
         or result["unsupported_claims"]
     )
+    result["speaker_attribution"] = "not_assessable:no-diarization"
     return result
 
 
@@ -368,7 +407,7 @@ def render_qa_block(verification: dict[str, Any]) -> str:
         "- Needs review: yes",
         f"- Missing decisions: {len(verification.get('decision_gaps', []))}",
         f"- Action item gaps: {len(verification.get('action_item_gaps', []))}",
-        f"- Attribution risks: {len(verification.get('speaker_attribution_risks', []))}",
+        "- Speaker attribution: not assessable (no diarization)",
         f"- Unsupported claims: {len(verification.get('unsupported_claims', []))}",
     ]
     return "\n".join(lines)

@@ -155,6 +155,18 @@ class ExtractClaimsTests(unittest.TestCase):
         self.assertEqual(fuzzy_claim["match_method"], "fuzzy")
         self.assertEqual(fuzzy_claim["timestamps"], ["00:02"])
 
+    def test_claims_contain_explicit_speaker_null_and_status_not_preserved(self):
+        with patch.object(claim_extractor, "call_openrouter", return_value=CLAIMS_JSON):
+            result = extract_claims(SEGMENTS, "transcript text")
+        self.assertIsNone(result["error"])
+        self.assertIsNone(result.get("speakers"))
+        self.assertEqual(result.get("speaker_status"), "not_preserved")
+        self.assertTrue(len(result["claims"]) > 0)
+        for claim in result["claims"]:
+            self.assertIsNone(claim["speakers"])
+            self.assertEqual(claim["speaker_status"], "not_preserved")
+
+
 
 class RenderClaimsBlockTests(unittest.TestCase):
     def test_renders_claims_with_timestamps(self):
@@ -222,6 +234,23 @@ class EvidenceArtifactTests(unittest.TestCase):
         )
         self.assertEqual(artifact["claims"][0]["match_method"], "exact")
         self.assertEqual(artifact["claims"][1]["match_method"], "fuzzy")
+
+    def test_evidence_artifact_records_speaker_null_and_status_not_preserved(self):
+        claims_result = {
+            "claims": [
+                {"claim": "Exact", "timestamps": ["00:02"], "match_method": "exact", "speakers": None, "speaker_status": "not_preserved"},
+            ],
+            "dropped_unresolved": 0,
+            "error": None,
+        }
+        artifact = build_evidence_artifact(
+            claims_result, meeting_date="2026-08-14", transcript_file="m.wav", model="m"
+        )
+        self.assertIsNone(artifact["speakers"])
+        self.assertEqual(artifact["speaker_status"], "not_preserved")
+        self.assertIsNone(artifact["claims"][0]["speakers"])
+        self.assertEqual(artifact["claims"][0]["speaker_status"], "not_preserved")
+
 
 
 if __name__ == "__main__":

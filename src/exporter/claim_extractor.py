@@ -219,10 +219,13 @@ def extract_claims(
             "timestamps": grounding["timestamps"],
             "match_method": grounding["match_method"],
             "speakers": None,
+            "speaker_status": "not_preserved",
         })
 
     result["claims"] = verified
     result["dropped_unresolved"] = dropped
+    result["speakers"] = None
+    result["speaker_status"] = "not_preserved"
     return result
 
 
@@ -274,5 +277,7 @@ def build_evidence_artifact(
         "model": model,
         "claims": claims_result.get("claims", []),
         "dropped_unresolved": claims_result.get("dropped_unresolved", 0),
+        "speakers": None,
+        "speaker_status": "not_preserved",
         "error": claims_result.get("error"),
     }
