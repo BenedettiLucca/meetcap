@@ -6,6 +6,10 @@
 //   "modules-right": ["custom/meetcap", ...]
 //
 // Pré-requisito: waybar-meetcap.py no PATH ou com caminho absoluto em "exec".
+//
+// Estados (#46): módulo fica VAZIO em idle/daemon fora do ar; exibe "🎙 MM:SS"
+// gravando e "📝" transcrevendo. O piscar é do CSS (ver bloco abaixo);
+// "--blink-fallback" é o fallback de glyph (🔴/⚪) para setups sem CSS.
 
 {
     "custom/meetcap": {
@@ -15,16 +19,29 @@
         "exec": "waybar-meetcap.py --once",
 
         // Intervalo de atualização em segundos. O script usa --once para
-        // que o Waybar controle o ciclo; use 5 para atualização a cada 5s.
-        "interval": 5,
+        // que o Waybar controle o ciclo; 2s acompanha o passo do blink CSS.
+        "interval": 2,
 
         // Waybar interpreta a saída como JSON (text / tooltip / class).
         "return-type": "json",
 
-        // Classes CSS disponíveis: "recording" (gravando) e "inactive" (parado).
+        // Classes CSS disponíveis: "recording" (gravando), "transcribing"
+        // (transcrevendo). Em idle o módulo não tem class e fica invisível;
+        // o tooltip vazio impede o "ghost tooltip" sobre o módulo invisível.
         // Adicione ao seu style.css:
-        //   #custom-meetcap.recording { color: #ff5555; }
-        //   #custom-meetcap.inactive  { color: #888888; }
+        //
+        //   #custom-meetcap.recording {
+        //       color: #ff5555;
+        //       animation: meetcap-blink 1s step-start infinite;
+        //   }
+        //   #custom-meetcap.transcribing {
+        //       color: #5588ff; // accent
+        //   }
+        //   @keyframes meetcap-blink {
+        //       0%   { opacity: 1; }
+        //       50%  { opacity: 0.3; }
+        //       100% { opacity: 1; }
+        //   }
         "tooltip": true
     }
 }
