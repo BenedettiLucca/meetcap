@@ -622,7 +622,6 @@ _export_jobs_lock = threading.Lock()
 _export_worker_queue: "_queue_module.Queue[str | None] | None" = None
 
 
-
 def _get_worker_queue() -> "_queue_module.Queue[str | None]":
     global _export_worker_queue
     if _export_worker_queue is None:

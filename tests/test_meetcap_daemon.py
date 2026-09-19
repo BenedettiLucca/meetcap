@@ -102,16 +102,15 @@ class StatusCommandTests(unittest.TestCase):
         meetcap.state.recording_file = Path("/tmp/fake.wav")
         meetcap.state.recording_since = None
         status = meetcap.handle_command("status")
-        self.assertEqual(
-            status,
-            {
-                "recording": meetcap.state.is_recording,
-                "transcribing": meetcap.state.is_transcribing,
-                "last_file": "/tmp/fake.wav",
-                "error": meetcap.state.last_error,
-                "recording_since": None,
-            },
-        )
+        # #16: status now includes exporting+last_export; check original fields are intact
+        self.assertEqual(status["recording"], meetcap.state.is_recording)
+        self.assertEqual(status["transcribing"], meetcap.state.is_transcribing)
+        self.assertEqual(status["last_file"], "/tmp/fake.wav")
+        self.assertEqual(status["error"], meetcap.state.last_error)
+        self.assertIsNone(status["recording_since"])
+        self.assertIn("exporting", status)  # #16 new field
+        self.assertIn("last_export", status)  # #16 new field
+
 
     def test_list_returns_recent_recordings(self):
         with patch.object(meetcap, "RECORDINGS_DIR") as recordings:

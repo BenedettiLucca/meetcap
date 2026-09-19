@@ -66,6 +66,11 @@ def log_path() -> Path:
     return runtime_dir() / "meetcap-daemon.log"
 
 
+def export_jobs_path() -> Path:
+    """Return path to meetcap export jobs state JSON file (#16)."""
+    return runtime_dir() / "meetcap_export_jobs.json"
+
+
 def pid_is_meetcap(pid: int | str | None) -> bool:
     """Return True only if process exists and /proc/<pid>/cmdline contains \"meetcap.py\"."""
     if pid is None:
