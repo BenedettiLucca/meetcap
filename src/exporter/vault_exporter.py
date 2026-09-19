@@ -45,6 +45,21 @@ def _stage(error: str | None) -> dict[str, Any]:
     """Normalize one pipeline stage into the {ok, error} contract shape."""
     return {"ok": error is None, "error": error}
 
+def _atomic_commit(final_path: Path, content: str, *, staging_suffix: str) -> None:
+    """#17: stage the artifact next to its final path (same filesystem), then
+    commit atomically via os.replace. On any failure the staging file is
+    removed so a crash or full disk can never leave a truncated file behind."""
+    staging = final_path.with_suffix(staging_suffix)
+    try:
+        staging.write_text(content, encoding="utf-8")
+        staging.replace(final_path)
+    except BaseException:
+        try:
+            staging.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
 def _warning_degradation(text: str) -> str | None:
     """Extract 'X generation failed: …' from a graceful-degradation warning block."""
     match = STAGE_WARN_PATTERN.search(text)
@@ -244,84 +259,130 @@ def export_note(txt_path: Path, custom_title: str | None = None) -> dict[str, An
         manifest_block=manifest_block,
     )
 
-    # #17 atomic write: write to .partial then os.replace to prevent truncated notes.
+    # #17 atomic commit protocol: stage → validate → os.replace. Failures never
+    # leave truncated files or staging litter; required artifacts (evidence,
+    # corrections) failing flips outcome to failed, optional ones (QA/manifest)
+    # degrade through the stages contract (#38).
+    artifact_dir = ARTIFACTS_DIR / safe_name
+    commit_errors: list[str] = []    # required artifact failures
+    optional_errors: list[str] = []  # optional artifact failures
+    artifacts: list[str] = []
+
+    def _record_failure(name: str, exc: Exception, required: bool) -> None:
+        if isinstance(exc, (ValueError, TypeError)):
+            message = f"JSON validation failed: {name} ({exc})"
+        else:
+            message = f"{name}: write failed ({exc})"
+        (commit_errors if required else optional_errors).append(message)
+
+    def _commit_json(name: str, payload: Any, required: bool) -> None:
+        """Stage JSON to .tmp, validate it parses, then atomically commit."""
+        path = artifact_dir / name
+        staged = path.with_name(f"{name}.tmp")
+        try:
+            staged.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            json.loads(staged.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            staged.unlink(missing_ok=True)
+            _record_failure(name, exc, required)
+            return
+        staged.replace(path)
+        artifacts.append(str(path))
+
+    def _commit_file(name: str, text: str, required: bool) -> None:
+        """Atomically commit a plain-text artifact via .tmp staging."""
+        path = artifact_dir / name
+        staged = path.with_name(f"{name}.tmp")
+        try:
+            staged.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            staged.unlink(missing_ok=True)
+            _record_failure(name, exc, required)
+            return
+        staged.replace(path)
+        artifacts.append(str(path))
+
     partial_path = out_path.with_suffix(".partial")
-    partial_path.write_text(content, encoding="utf-8")
-    partial_path.replace(out_path)
+    try:
+        partial_path.write_text(content, encoding="utf-8")
+        partial_path.replace(out_path)
+    except OSError as exc:
+        partial_path.unlink(missing_ok=True)
+        print(f"[EXPORT] Note write failed: {exc}")
+        return {
+            "success": False,
+            "outcome": "failed",
+            "stages": {**stages, "artifacts": _stage(f"note: {exc}")},
+            "errors": [f"note: {exc}"],
+            "path": "",
+            "filename": filename,
+            "transcript_lines": data["line_count"],
+            "summary_length": len(summary),
+            "task_suggestions_length": len(task_suggestions),
+            "claims_verified": len(claims_result["claims"]),
+            "entity_corrections": len(corrections),
+            "qa_needs_review": verification.get("needs_human_review", False),
+            "qa_coverage_score": verification.get("coverage_score"),
+            "downstream_lanes": manifest["downstreamLanes"] if manifest else [],
+            "artifacts": [],
+            "duration": data["duration_str"],
+        }
     print(f"[EXPORT] Saved to {out_path}")
 
-    artifacts: list[str] = []
-    artifacts_failed = False
-    artifact_dir = ARTIFACTS_DIR / safe_name
+    artifact_dir.mkdir(parents=True, exist_ok=True)
     try:
-        artifact_dir.mkdir(parents=True, exist_ok=True)
         evidence = build_evidence_artifact(
             claims_result,
             meeting_date=data["meeting_date"],
             transcript_file=data["meta"].get("file", ""),
         )
-        evidence_path = artifact_dir / "evidence.json"
-        evidence_path.write_text(
-            json.dumps(evidence, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-        artifacts.append(str(evidence_path))
+        _commit_json("evidence.json", evidence, required=True)
         if corrections:
-            corrections_path = artifact_dir / "corrections.json"
-            corrections_path.write_text(
-                json.dumps(
-                    {"schema": "meetcap.corrections/1", "corrections": corrections},
-                    indent=2,
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
+            _commit_json(
+                "corrections.json",
+                {"schema": "meetcap.corrections/1", "corrections": corrections},
+                required=True,
             )
-            artifacts.append(str(corrections_path))
         if EXPORT_QA_ENABLED:
-            verification_path = artifact_dir / "verification.json"
-            verification_path.write_text(
-                json.dumps(
-                    build_verification_artifact(
-                        verification,
-                        meeting_date=data["meeting_date"],
-                        transcript_file=data["meta"].get("file", ""),
-                    ),
-                    indent=2,
-                    ensure_ascii=False,
+            _commit_json(
+                "verification.json",
+                build_verification_artifact(
+                    verification,
+                    meeting_date=data["meeting_date"],
+                    transcript_file=data["meta"].get("file", ""),
                 ),
-                encoding="utf-8",
+                required=False,
             )
-            artifacts.append(str(verification_path))
-            verification_md_path = artifact_dir / "verification.md"
-            verification_md_path.write_text(
-                render_verification_md(verification), encoding="utf-8"
+            _commit_file(
+                "verification.md", render_verification_md(verification), required=False
             )
-            artifacts.append(str(verification_md_path))
         if EXPORT_MANIFEST_ENABLED and manifest is not None:
-            manifest_path = artifact_dir / "room_manifest.json"
-            manifest_path.write_text(
-                json.dumps(manifest, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-            artifacts.append(str(manifest_path))
+            _commit_json("room_manifest.json", manifest, required=False)
     except OSError as exc:
-        artifacts_failed = True
-        print(f"[EXPORT] Artifact write failed: {exc}")
-        # Prune artifacts list to only what actually exists on disk.
-        artifacts = [a for a in artifacts if Path(a).exists()]
+        # A raising builder means the artifact never got committed at all.
+        commit_errors.append(f"artifacts: build failed ({exc})")
 
-    # #38: outcome is first-class — degradation is not a plain success, and a
-    # hard failure anywhere flips both outcome and success (rc!=0) even though
-    # the note itself was written gracefully. A failed summary is a failed
-    # export: the note's core deliverable is the summary.
+    stages["artifacts"] = _stage("; ".join(commit_errors + optional_errors) or None)
+
+    # #38/#17: outcome is first-class — degradation is not a plain success, and
+    # a hard failure (summary or required artifact) flips both outcome and
+    # success (rc!=0) even though the note itself was written gracefully. A
+    # failed summary is a failed export: the note's core deliverable is the
+    # summary.
     stage_errors = [f"{name}: {stage['error']}" for name, stage in stages.items() if not stage["ok"]]
     outcome = "ok" if not stage_errors else "degraded"
-    success = not artifacts_failed
-    if artifacts_failed:
-        outcome = "failed"
-        stage_errors.append("artifacts: artifact write failed")
-    elif not stages["summary"]["ok"] or (stage_errors and len(stage_errors) == len(stages)):
+    success = True
+    if (
+        commit_errors
+        or not stages["summary"]["ok"]
+        or (stage_errors and len(stage_errors) == len(stages))
+    ):
         outcome = "failed"
         success = False
+    stage_errors.extend(optional_errors)
+    stage_errors.extend(commit_errors)
 
     return {
         "success": success,
